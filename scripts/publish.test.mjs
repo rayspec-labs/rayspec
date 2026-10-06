@@ -10,8 +10,9 @@
  * The script is therefore driven end-to-end here against a THROWAWAY GIT REPO built per case (real
  * commits, real annotated/lightweight tags) with the real `publish.mjs` COPIED into it, so its
  * repo root resolves to the fixture. Its one external boundary — the package manager — is MOCKED:
- * a stub executable named `pnpm` is placed FIRST on the child's PATH and records every invocation.
- * No test-only flag or seam exists in the script itself. Every refusal case asserts the stub was
+ * stub executables named `pnpm` and `npm` are placed FIRST on the child's PATH and record every
+ * invocation; the `npm` stub is also the registry, a JSON file it answers lookups from and writes
+ * each publish to. No test-only flag or seam exists in the script itself. Every refusal case asserts the stub was
  * never invoked, which is the "before packing" half of the property; the refusal cases that need
  * `--publish` additionally point the child at an unroutable registry, so a real registry write is
  * impossible by construction even if the stub were somehow bypassed.
@@ -62,6 +63,16 @@
  *       a `--publish --from` run skips a target the registry already serves with its tarball's exact
  *       integrity and publishes the rest; a target served with other bytes, or a registry that cannot
  *       be asked, refuses before the first call. The launcher is always published last.
+ *   (I) A REAL PUBLISH IS ATTACHED TO THE TERMINAL — npm prints an authentication URL for a
+ *       browser-based second factor and waits on the terminal for the approval, so the publish child
+ *       inherits stdin and its output reaches the operator; with piped stdio the first target fails
+ *       and nothing is published. `--otp <code>` reaches every publish call for an account with
+ *       code-based two-factor authentication, and is refused outside `--publish`. Every publish
+ *       carries `--access public`: without it npm creates a new scoped package as a restricted one.
+ *   (X) A FAILED PUBLISH NAMES ITS PACKAGE AND CAN BE CONTINUED — the run stops at the first target
+ *       npm refuses, names it and what was published before it, restores every manifest and exits 1;
+ *       the same command again publishes exactly the targets the registry does not have yet. A run
+ *       that packed its own bytes says that it cannot be continued, and restores the tree too.
  *   (P) THE POSITIVE CONTROL — a coherent checkout packs: the derived version is the reported one,
  *       every target is packed exactly once in dependency order, and the tree is byte-identical
  *       afterwards.
@@ -116,23 +127,47 @@ if (argv[0] === 'pack' && destIdx !== -1) {
   writeFileSync(join(dest, pkg.name.replace('@', '').replace('/', '-') + '-' + pkg.version + '.tgz'), '');
 }
 process.stdout.write('fake pnpm: ' + argv.join(' ') + '\\n');
+if (argv[0] === 'publish' && process.env.FAKE_PNPM_FAIL_AT === own.name) {
+  process.stderr.write('npm error code EOTP\\n');
+  process.exit(1);
+}
 `;
 
-// ── the `npm` test double ───────────────────────────────────────────────────────────────────────
-// Answers `npm view <name>@<version> dist.integrity` from FAKE_NPM_REGISTRY (a JSON map of spec to
-// integrity, or to "!down" for a registry that cannot be reached), and like the real one exits 1
-// with `E404` for a spec it does not hold. Every call is logged, so a case can show which targets
-// were looked up.
+// ── the `npm` test double, which is also the registry ───────────────────────────────────────────
+// The registry is the JSON file FAKE_NPM_REGISTRY_FILE names: a map of spec to integrity, or to
+// "!down" for a registry that cannot be reached. `npm view <name>@<version> dist.integrity` answers
+// from it and, like the real one, exits 1 with `E404` for a spec it does not hold. `npm publish
+// <tarball>` writes the tarball's spec and integrity into it, refuses a spec it already holds (npm
+// never takes a version twice), and fails with `EOTP` for the package FAKE_NPM_FAIL_AT names.
+// Every call is logged: a publish with the package it read from the tarball, what it could read
+// from stdin, and whether a tracked file of the repository was modified while it ran.
 const FAKE_NPM = `#!/usr/bin/env node
-import { appendFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 const argv = process.argv.slice(2);
-appendFileSync(process.env.FAKE_NPM_LOG, JSON.stringify({ argv }) + '\\n');
-const registry = JSON.parse(process.env.FAKE_NPM_REGISTRY || '{}');
-if (argv[0] !== 'view') { process.stderr.write('fake npm: only view\\n'); process.exit(1); }
-const served = registry[argv[1]];
-if (served === '!down') { process.stderr.write('npm error code ECONNREFUSED\\n'); process.exit(1); }
-if (served === undefined) { process.stderr.write('npm error code E404\\nnpm error 404 Not Found\\n'); process.exit(1); }
-process.stdout.write(served + '\\n');
+const log = (extra) => appendFileSync(process.env.FAKE_NPM_LOG, JSON.stringify({ argv, ...extra }) + '\\n');
+const fail = (text) => { process.stderr.write(text + '\\n'); process.exit(1); };
+const registry = JSON.parse(readFileSync(process.env.FAKE_NPM_REGISTRY_FILE, 'utf8'));
+if (argv[0] === 'view') {
+  log({});
+  const served = registry[argv[1]];
+  if (served === '!down') fail('npm error code ECONNREFUSED');
+  if (served === undefined) fail('npm error code E404\\nnpm error 404 Not Found');
+  process.stdout.write(served + '\\n');
+} else if (argv[0] === 'publish') {
+  const manifest = JSON.parse(execFileSync('tar', ['-xzOf', argv[1], 'package/package.json'], { encoding: 'utf8' }));
+  const spec = manifest.name + '@' + manifest.version;
+  const stdin = process.env.FAKE_NPM_READ_STDIN ? readFileSync(0, 'utf8') : null;
+  const dirty = execFileSync('git', ['status', '--porcelain', '--untracked-files=no'], { encoding: 'utf8' }).trim();
+  log({ name: manifest.name, stdin, dirty });
+  process.stdout.write('fake npm: authenticate ' + manifest.name + ' in the browser\\n');
+  if (process.env.FAKE_NPM_FAIL_AT === manifest.name) fail('npm error code EOTP');
+  if (argv.includes('--dry-run')) process.exit(0);
+  if (registry[spec] !== undefined) fail('npm error code E403\\nnpm error You cannot publish over the previously published versions');
+  registry[spec] = 'sha512-' + createHash('sha512').update(readFileSync(argv[1])).digest('base64');
+  writeFileSync(process.env.FAKE_NPM_REGISTRY_FILE, JSON.stringify(registry));
+} else fail('fake npm: only view and publish');
 `;
 
 /**
@@ -245,34 +280,51 @@ function fixture({
 }
 
 /**
- * Drive the REAL script inside the fixture with `pnpm` shadowed on PATH. `allowPublish` supplies the
- * publish gate for the cases that must reach the tag check; the unroutable registry is the second
- * belt behind the stub — nothing here can reach a real one.
+ * Drive the REAL script inside the fixture with `pnpm` and `npm` shadowed on PATH. `allowPublish`
+ * supplies the publish gate for the cases that must reach the tag check; the unroutable registry is
+ * the second belt behind the stubs — nothing here can reach a real one. `registry` is what the fake
+ * registry holds when the run starts and `registryAfter` what it holds afterwards; `failAt` makes
+ * the publish of that package fail (`pnpmFailAt` for a target this run packs itself); `input` is
+ * the run's own stdin, which the first publish call reads when it inherited it.
  */
-function run(fx, args, { allowPublish = false, registry = {} } = {}) {
+function run(fx, args, { allowPublish = false, registry = {}, failAt, pnpmFailAt, input } = {}) {
   const log = join(fx.root, 'pnpm-calls.log');
   writeFileSync(log, '');
   const npmLog = join(fx.root, 'npm-calls.log');
   writeFileSync(npmLog, '');
+  const registryFile = join(fx.root, 'npm-registry.json');
+  writeFileSync(registryFile, JSON.stringify(registry));
   const res = spawnSync('node', [join(fx.root, 'scripts', 'publish.mjs'), ...args], {
     cwd: fx.root,
     encoding: 'utf8',
+    ...(input === undefined ? {} : { input }),
     env: {
       ...process.env,
       PATH: `${fx.stubs}:${process.env.PATH}`,
       FAKE_PNPM_LOG: log,
       FAKE_NPM_LOG: npmLog,
-      FAKE_NPM_REGISTRY: JSON.stringify(registry),
+      FAKE_NPM_REGISTRY_FILE: registryFile,
       npm_config_registry: 'http://127.0.0.1:1/',
+      ...(failAt === undefined ? {} : { FAKE_NPM_FAIL_AT: failAt }),
+      ...(pnpmFailAt === undefined ? {} : { FAKE_PNPM_FAIL_AT: pnpmFailAt }),
+      ...(input === undefined ? {} : { FAKE_NPM_READ_STDIN: '1' }),
       ...(allowPublish ? { RAYSPEC_ALLOW_PUBLISH: '1' } : {}),
     },
   });
   const calls = readFileSync(log, 'utf8').split('\n').filter(Boolean).map(JSON.parse);
-  const lookups = readFileSync(npmLog, 'utf8').split('\n').filter(Boolean).map(JSON.parse);
-  return { code: res.status, out: res.stdout ?? '', err: res.stderr ?? '', calls, lookups };
+  const npmCalls = readFileSync(npmLog, 'utf8').split('\n').filter(Boolean).map(JSON.parse);
+  return {
+    code: res.status,
+    out: res.stdout ?? '',
+    err: res.stderr ?? '',
+    calls,
+    lookups: npmCalls.filter((c) => c.argv[0] === 'view'),
+    publishes: npmCalls.filter((c) => c.argv[0] === 'publish'),
+    registryAfter: JSON.parse(readFileSync(registryFile, 'utf8')),
+  };
 }
 
-/** A refusal: nonzero exit, an explanation on stderr, and NOT ONE package manager invocation. */
+/** A refusal: exit 2, an explanation on stderr, and NOT ONE pack or publish invocation. */
 function assertRefused(r, label, fx) {
   // Exit 2 specifically, not merely nonzero: an uncaught throw exits 1, and a refusal that decayed
   // into a stack trace would still satisfy "nonzero" while telling an operator nothing.
@@ -282,6 +334,11 @@ function assertRefused(r, label, fx) {
     r.calls,
     [],
     `${label} the refusal must land BEFORE the first pnpm invocation, got ${JSON.stringify(r.calls)}`,
+  );
+  assert.deepEqual(
+    r.publishes,
+    [],
+    `${label} the refusal must land BEFORE the first publish, got ${JSON.stringify(r.publishes)}`,
   );
   // The other half of "nothing happened": `process.exit` skips the restore `finally`, so a guard
   // that ran after the stamping loop would leave every manifest rewritten and private:false on disk.
@@ -671,39 +728,102 @@ try {
       TARGETS.map((n) => [n, VERSION]),
       'packed',
     );
-    const r = run(fx, ['--publish', '--yes-really-publish', '--from', good, '--json'], {
-      allowPublish: true,
-    });
-    assert.equal(r.code, 0, `(F) a packed release must publish; got ${r.code}: ${r.err}`);
-    assert.equal(r.calls.length, TARGETS.length, '(F) one publish per target');
-    const order = packedOrder(r.calls, fx.root);
-    for (const m of MEMBERS.filter((x) => x.target)) {
-      for (const dep of m.deps) {
-        assert.ok(
-          order.indexOf(dep) < order.indexOf(m.name),
-          `(F) ${dep} before ${m.name}: ${order}`,
-        );
+    const tracked = () => gitIn(fx.root, 'status', '--porcelain', '--untracked-files=no');
+    const dependenciesFirst = (order, label) => {
+      for (const m of MEMBERS.filter((x) => x.target)) {
+        for (const dep of m.deps) {
+          if (!order.includes(dep) || !order.includes(m.name)) continue;
+          assert.ok(
+            order.indexOf(dep) < order.indexOf(m.name),
+            `${label} ${dep} before ${m.name}: ${order}`,
+          );
+        }
       }
-    }
-    for (const c of r.calls) {
-      assert.equal(c.argv[0], 'publish', `(F) every call publishes: ${c.argv}`);
+    };
+    const publishArgs = ['--publish', '--yes-really-publish', '--from', good];
+    const r = run(fx, [...publishArgs, '--json'], { allowPublish: true });
+    assert.equal(r.code, 0, `(F) a packed release must publish; got ${r.code}: ${r.err}`);
+    assert.equal(r.publishes.length, TARGETS.length, '(F) one publish per target');
+    assert.deepEqual(r.calls, [], '(F) nothing is packed again when the tarballs are given');
+    const order = r.publishes.map((c) => c.name);
+    dependenciesFirst(order, '(F)');
+    for (const c of r.publishes) {
       assert.match(c.argv[1], /\.tgz$/, `(F) every call names its tarball: ${c.argv}`);
       assert.ok(c.argv[1].startsWith(good), `(F) the tarball comes from --from: ${c.argv}`);
-      assert.equal(c.private, true, '(F) nothing is stamped when the tarballs carry the version');
+      assert.equal(c.dirty, '', '(F) nothing is stamped when the tarballs carry the version');
     }
     assert.equal(JSON.parse(r.out).from, good, '(F) the summary names the directory');
     assert.equal(order.at(-1), 'rayspec', `(F) the launcher is published last: ${order}`);
     assert.equal(r.lookups.length, TARGETS.length, '(F) the registry is asked once per target');
-
-    // (N) a publish that stopped after @rayspec/core: the next run skips it and publishes the rest.
     const integrity = (name) =>
       `sha512-${createHash('sha512')
         .update(
           readFileSync(join(good, `${name.replace('@', '').replace('/', '-')}-${VERSION}.tgz`)),
         )
         .digest('base64')}`;
+    assert.deepEqual(
+      r.registryAfter,
+      Object.fromEntries(TARGETS.map((n) => [`${n}@${VERSION}`, integrity(n)])),
+      '(F) the registry holds exactly the bytes of the given tarballs',
+    );
+
+    // (I) the publish is attached to the terminal, carries the access flag and hands on --otp.
+    {
+      const attached = run(fx, publishArgs, { allowPublish: true, input: 'approved\n' });
+      assert.equal(attached.code, 0, `(I) the publish must run; got ${attached.err}`);
+      assert.equal(
+        attached.publishes[0].stdin,
+        'approved\n',
+        '(I) the publish child reads the stdin the run was started with',
+      );
+      assert.match(
+        attached.out,
+        /fake npm: authenticate @rayspec\/core in the browser/,
+        `(I) what npm prints reaches the operator: ${attached.out}`,
+      );
+      for (const c of attached.publishes) {
+        assert.deepEqual(
+          c.argv.slice(2),
+          ['--access', 'public'],
+          `(I) every publish creates its package public, and nothing else: ${c.argv}`,
+        );
+      }
+      // With --json the child's output goes to stderr: stdout stays one JSON document (r above).
+      assert.match(r.err, /fake npm: authenticate/, `(I) --json keeps npm's output: ${r.err}`);
+
+      const coded = run(fx, [...publishArgs, '--otp', '123456'], { allowPublish: true });
+      assert.equal(coded.code, 0, `(I) --otp must publish; got ${coded.err}`);
+      for (const c of coded.publishes) {
+        assert.deepEqual(
+          c.argv.slice(2),
+          ['--access', 'public', '--otp=123456'],
+          `(I) the one-time code reaches every publish: ${c.argv}`,
+        );
+      }
+      for (const args of [
+        ['--dry-run', '--from', good, '--otp', '123456'],
+        [...publishArgs, '--otp'],
+        [...publishArgs, '--otp', '--json'],
+      ]) {
+        const refused = run(fx, args, { allowPublish: true });
+        assertRefused(refused, '(I) --otp', fx);
+        assert.match(refused.err, /--otp <code>/, `(I) the refusal names the flag: ${refused.err}`);
+      }
+      // The second factor never weakens the gate: a code without the two opt-ins publishes nothing.
+      assertRefused(run(fx, [...publishArgs, '--otp', '123456']), '(I) --otp without the gate', fx);
+      assertRefused(
+        run(fx, ['--publish', '--from', good, '--otp', '123456'], { allowPublish: true }),
+        '(I) --otp without --yes-really-publish',
+        fx,
+      );
+      console.log(
+        'ok (I) — a publish is attached to the terminal, public, and takes a one-time code',
+      );
+    }
+
+    // (N) a publish that stopped after @rayspec/core: the next run skips it and publishes the rest.
     const core = `@rayspec/core@${VERSION}`;
-    const resumed = run(fx, ['--publish', '--yes-really-publish', '--from', good, '--json'], {
+    const resumed = run(fx, [...publishArgs, '--json'], {
       allowPublish: true,
       registry: { [core]: integrity('@rayspec/core') },
     });
@@ -712,7 +832,7 @@ try {
       0,
       `(N) a stopped publish continues; got ${resumed.code}: ${resumed.err}`,
     );
-    const resumedOrder = packedOrder(resumed.calls, fx.root);
+    const resumedOrder = resumed.publishes.map((c) => c.name);
     assert.deepEqual(
       [...resumedOrder].sort(),
       TARGETS.filter((n) => n !== '@rayspec/core').sort(),
@@ -726,23 +846,140 @@ try {
     );
     for (const [registry, pattern] of [
       [{ [core]: 'sha512-other' }, /@rayspec\/core@1\.6\.2 is already on npm as sha512-other/],
+      // The mismatch is the LAST target in the order: a check made per target inside the publish
+      // loop would have published the three before it.
+      [
+        { [`rayspec@${VERSION}`]: 'sha512-other' },
+        /rayspec@1\.6\.2 is already on npm as sha512-other/,
+      ],
       [
         { [`@rayspec/server@${VERSION}`]: '!down' },
         /@rayspec\/server@1\.6\.2: the registry cannot be asked/,
       ],
     ]) {
-      const refused = run(fx, ['--publish', '--yes-really-publish', '--from', good], {
-        allowPublish: true,
-        registry,
-      });
+      const refused = run(fx, publishArgs, { allowPublish: true, registry });
       assertRefused(refused, '(N)', fx);
       assert.match(refused.err, pattern, `(N) the problem must be named: ${refused.err}`);
+      assert.deepEqual(refused.registryAfter, registry, '(N) the registry is left as it was');
     }
     // Only a real publish asks the registry: a dry run over the same tarballs stays offline.
     const dry = run(fx, ['--dry-run', '--from', good], { registry: { [core]: 'sha512-other' } });
     assert.equal(dry.code, 0, `(N) a dry run does not ask the registry: ${dry.err}`);
     assert.equal(dry.lookups.length, 0, '(N) no lookup in a dry run');
+    assert.equal(dry.publishes.length, TARGETS.length, '(N) the dry run rehearses every target');
+    for (const c of dry.publishes) {
+      assert.deepEqual(
+        c.argv.slice(2),
+        ['--dry-run', '--access', 'public'],
+        `(N) a dry run never publishes: ${c.argv}`,
+      );
+    }
+    assert.deepEqual(dry.registryAfter, { [core]: 'sha512-other' }, '(N) a dry run writes nothing');
+    // npm refuses a version it already has in a dry run too: the run names the target, exit 1.
+    const dryStopped = run(fx, ['--dry-run', '--from', good], { failAt: '@rayspec/core' });
+    assert.equal(dryStopped.code, 1, `(N) a failed dry run exits 1; got ${dryStopped.code}`);
+    assert.match(
+      dryStopped.err,
+      /dry-run of @rayspec\/core@1\.6\.2 failed \(exit 1\)\.\na dry run writes nothing/,
+      `(N) a failed dry run names its target: ${dryStopped.err}`,
+    );
+    assert.equal(dryStopped.publishes.length, 1, '(N) and stops there');
     console.log('ok (N) — a stopped publish continues with the missing targets only');
+
+    // (X) a publish call that fails: named, nothing after it published, and the rerun continues.
+    {
+      const victim = order[2];
+      const stopped = run(fx, publishArgs, { allowPublish: true, failAt: victim });
+      assert.equal(stopped.code, 1, `(X) a failed publish exits 1; got ${stopped.code}`);
+      assert.deepEqual(
+        stopped.publishes.map((c) => c.name),
+        order.slice(0, 3),
+        '(X) the run stops at the target that failed',
+      );
+      assert.deepEqual(
+        Object.keys(stopped.registryAfter).sort(),
+        order
+          .slice(0, 2)
+          .map((n) => `${n}@${VERSION}`)
+          .sort(),
+        '(X) nothing after the failed target is published',
+      );
+      assert.ok(
+        stopped.err.includes(`publish of ${victim}@${VERSION} failed (exit 1)`),
+        `(X) the failed package is named: ${stopped.err}`,
+      );
+      assert.ok(
+        stopped.err.includes(
+          `published by this run before it (2): ${order.slice(0, 2).join(', ')}`,
+        ),
+        `(X) what is already public is named: ${stopped.err}`,
+      );
+      assert.match(
+        stopped.err,
+        /run the same command again: it continues/,
+        `(X) the failure says how to go on: ${stopped.err}`,
+      );
+      assert.match(
+        stopped.err,
+        /not attached to a terminal.*--otp <code>/s,
+        `(X) a run without a terminal says why a browser approval cannot work: ${stopped.err}`,
+      );
+      assert.equal(tracked(), '', '(X) a failed publish leaves every tracked byte alone');
+
+      const first = run(fx, [...publishArgs, '--json'], { allowPublish: true, failAt: order[0] });
+      assert.equal(first.code, 1, '(X) a failure of the first target exits 1');
+      assert.match(first.err, /nothing was published by this run/, `(X) ${first.err}`);
+      const failedSummary = JSON.parse(first.out);
+      assert.equal(failedSummary.failed, order[0], '(X) the summary names the failed target');
+      assert.deepEqual(
+        failedSummary.results,
+        [{ name: order[0], version: VERSION, ok: false }],
+        '(X) the summary lists no target after the failed one',
+      );
+
+      const again = run(fx, [...publishArgs, '--json'], {
+        allowPublish: true,
+        registry: stopped.registryAfter,
+      });
+      assert.equal(again.code, 0, `(X) the same command continues; got ${again.err}`);
+      assert.deepEqual(
+        again.publishes.map((c) => c.name),
+        order.slice(2),
+        '(X) the rerun publishes exactly the targets the registry does not have',
+      );
+      assert.equal(JSON.parse(again.out).failed, null, '(X) a complete run names no failure');
+      assert.deepEqual(again.registryAfter, r.registryAfter, '(X) the release is complete');
+
+      const complete = run(fx, publishArgs, { allowPublish: true, registry: again.registryAfter });
+      assert.equal(complete.code, 0, `(X) a run over a complete release succeeds: ${complete.err}`);
+      assert.deepEqual(complete.publishes, [], '(X) and publishes nothing a second time');
+
+      // A run without --from packs its own bytes: it is attached and public too, restores the tree
+      // after a failure, and says that it cannot be continued.
+      const own = run(fx, ['--publish', '--yes-really-publish'], { allowPublish: true });
+      assert.equal(own.code, 0, `(X) a publish that packs must run; got ${own.err}`);
+      assert.equal(own.calls.length, TARGETS.length, '(X) one publish per target');
+      for (const c of own.calls) {
+        assert.deepEqual(c.argv, ['publish', '--no-git-checks', '--access', 'public']);
+        assert.equal(c.private, false, '(X) a target packed by the run is stamped while it runs');
+      }
+      assert.match(own.out, /fake pnpm: publish/, `(X) the child's output is shown: ${own.out}`);
+      assert.equal(tracked(), '', '(X) the tree is restored after the publish');
+      const ownOrder = packedOrder(own.calls, fx.root);
+      const ownStopped = run(fx, ['--publish', '--yes-really-publish'], {
+        allowPublish: true,
+        pnpmFailAt: ownOrder[1],
+      });
+      assert.equal(ownStopped.code, 1, '(X) a failed publish exits 1');
+      assert.equal(ownStopped.calls.length, 2, '(X) the run stops at the target that failed');
+      assert.ok(
+        ownStopped.err.includes(`publish of ${ownOrder[1]}@${VERSION} failed`),
+        `(X) the failed package is named: ${ownStopped.err}`,
+      );
+      assert.match(ownStopped.err, /cannot be continued/, `(X) ${ownStopped.err}`);
+      assert.equal(tracked(), '', '(X) a failed publish restores every stamped manifest');
+      console.log('ok (X) — a failed publish names its package, restores the tree and continues');
+    }
 
     const missing = packDir(
       fx,

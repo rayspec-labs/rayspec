@@ -1,123 +1,139 @@
-# osv-scanner configuration for the CONSUMER install scan in ci.yml ("Consumer install audit").
+# osv-scanner configuration for the CONSUMER install scan in ci.yml ("Consumer install audit") and
+# for the image install scan in candidate.yml ("Image install audit"), which scans the lockfile the
+# runtime image was installed from.
 #
-# That step installs the packed release with npm, the way a consumer does, and scans the resulting
-# package-lock.json. It sees what the workspace lockfile scan cannot: copies a dependency pins in its
-# own npm-shrinkwrap.json, which no pnpm.overrides entry reaches. The root osv-scanner.toml governs
-# the workspace scan; this file governs only the consumer scan, and is passed to it with --config.
+# The consumer step installs the packed release with npm, the way a consumer does, and scans the
+# resulting package-lock.json. It sees what the workspace lockfile scan cannot: copies a dependency
+# pins in its own npm-shrinkwrap.json, which no pnpm.overrides entry reaches. The root
+# osv-scanner.toml governs the workspace scan; this file governs only these two scans, and is passed
+# to them with --config.
 #
 # Every entry below is a copy pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent
-# 0.79.9, which reaches consumers through @rayspec/adapter-pi. The fix is to move the adapter to
-# pi-coding-agent and pi-ai 0.86.0 or later, whose shrinkwrap carries patched versions; that crosses
-# breaking SDK releases (the AuthStorage export the adapter uses is gone since 0.80.8), so it is its
-# own change. Each entry expires on 2026-10-31: the scan fails again then, whether or not the move
-# has landed. Renew only with a reason that still holds, never by lowering the gate.
+# 0.79.9, which reaches consumers through @rayspec/adapter-pi: undici 8.5.0 (15 advisories),
+# brace-expansion 5.0.6 (6) and protobufjs 7.6.4 (1).
+#
+# Checked on 2026-10-06 against the registry and OSV.dev, every release from 0.79.9 to 1.0.4 (the
+# newest):
+#   - 0.79.10 to 0.80.10 pin the same three copies, so no release the adapter can take without
+#     changes clears an entry.
+#   - 0.81.0 to 0.85.1 move the copies forward, each to a version that still carries advisories.
+#   - 0.86.0 to 1.0.0 pin undici 8.10.2 and protobufjs 7.6.6, which carry no advisory, and
+#     brace-expansion 5.0.9, which still carries three of the six.
+#   - 1.0.1 to 1.0.4 ship no npm-shrinkwrap.json and depend on undici 8.10.2 and brace-expansion
+#     5.0.12, which carry no advisory. 1.0.1 is the first release that clears all 22.
+# The adapter cannot move to any of the patched releases unchanged: since 0.80.8 the SDK no longer
+# exports AuthStorage and takes its credentials and models through an asynchronous `modelRuntime`
+# option in place of `authStorage` and `modelRegistry`, and the adapter's recorded fixtures are
+# bound to the SDK version. That move is its own change. Until it lands each entry expires on
+# 2026-12-06: the scan fails again then. Renew only with a reason that still holds and a check
+# that was made again, never by lowering the gate.
 
 [[IgnoredVulns]]
 id = "GHSA-3jxr-9vmj-r5cp"
-ignoreUntil = 2026-10-31
-reason = "brace-expansion 5.0.6, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Fixed by moving to pi-coding-agent 0.86.0 or later."
+ignoreUntil = 2026-12-06
+reason = "brace-expansion 5.0.6, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Checked 2026-10-06: every release up to 0.80.10 pins the same copy, and the first release that pins none with an advisory is 1.0.1, which the adapter cannot take without changes (AuthStorage is no longer exported since 0.80.8)."
 
 [[IgnoredVulns]]
 id = "GHSA-mh99-v99m-4gvg"
-ignoreUntil = 2026-10-31
-reason = "brace-expansion 5.0.6, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Fixed by moving to pi-coding-agent 0.86.0 or later."
+ignoreUntil = 2026-12-06
+reason = "brace-expansion 5.0.6, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Checked 2026-10-06: every release up to 0.80.10 pins the same copy, and the first release that pins none with an advisory is 1.0.1, which the adapter cannot take without changes (AuthStorage is no longer exported since 0.80.8)."
 
 [[IgnoredVulns]]
 id = "GHSA-rgw5-rvv9-x895"
-ignoreUntil = 2026-10-31
-reason = "brace-expansion 5.0.6, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Fixed by moving to pi-coding-agent 0.86.0 or later."
+ignoreUntil = 2026-12-06
+reason = "brace-expansion 5.0.6, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Checked 2026-10-06: every release up to 0.80.10 pins the same copy, and the first release that pins none with an advisory is 1.0.1, which the adapter cannot take without changes (AuthStorage is no longer exported since 0.80.8)."
 
 [[IgnoredVulns]]
 id = "GHSA-j3f2-48v5-ccww"
-ignoreUntil = 2026-10-31
-reason = "protobufjs 7.6.4, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Fixed by moving to pi-coding-agent 0.86.0 or later."
+ignoreUntil = 2026-12-06
+reason = "protobufjs 7.6.4, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Checked 2026-10-06: every release up to 0.80.10 pins the same copy, and the first release that pins none with an advisory is 1.0.1, which the adapter cannot take without changes (AuthStorage is no longer exported since 0.80.8)."
 
 [[IgnoredVulns]]
 id = "GHSA-2gqq-gqf2-x968"
-ignoreUntil = 2026-10-31
-reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Fixed by moving to pi-coding-agent 0.86.0 or later."
+ignoreUntil = 2026-12-06
+reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Checked 2026-10-06: every release up to 0.80.10 pins the same copy, and the first release that pins none with an advisory is 1.0.1, which the adapter cannot take without changes (AuthStorage is no longer exported since 0.80.8)."
 
 [[IgnoredVulns]]
 id = "GHSA-2jfj-6hjv-fm6j"
-ignoreUntil = 2026-10-31
-reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Fixed by moving to pi-coding-agent 0.86.0 or later."
+ignoreUntil = 2026-12-06
+reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Checked 2026-10-06: every release up to 0.80.10 pins the same copy, and the first release that pins none with an advisory is 1.0.1, which the adapter cannot take without changes (AuthStorage is no longer exported since 0.80.8)."
 
 [[IgnoredVulns]]
 id = "GHSA-3wwx-pv8p-q78v"
-ignoreUntil = 2026-10-31
-reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Fixed by moving to pi-coding-agent 0.86.0 or later."
+ignoreUntil = 2026-12-06
+reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Checked 2026-10-06: every release up to 0.80.10 pins the same copy, and the first release that pins none with an advisory is 1.0.1, which the adapter cannot take without changes (AuthStorage is no longer exported since 0.80.8)."
 
 [[IgnoredVulns]]
 id = "GHSA-3xpg-4rpp-hhhm"
-ignoreUntil = 2026-10-31
-reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Fixed by moving to pi-coding-agent 0.86.0 or later."
+ignoreUntil = 2026-12-06
+reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Checked 2026-10-06: every release up to 0.80.10 pins the same copy, and the first release that pins none with an advisory is 1.0.1, which the adapter cannot take without changes (AuthStorage is no longer exported since 0.80.8)."
 
 [[IgnoredVulns]]
 id = "GHSA-4cwx-7wf7-3272"
-ignoreUntil = 2026-10-31
-reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Fixed by moving to pi-coding-agent 0.86.0 or later."
+ignoreUntil = 2026-12-06
+reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Checked 2026-10-06: every release up to 0.80.10 pins the same copy, and the first release that pins none with an advisory is 1.0.1, which the adapter cannot take without changes (AuthStorage is no longer exported since 0.80.8)."
 
 [[IgnoredVulns]]
 id = "GHSA-8436-99hf-9mmv"
-ignoreUntil = 2026-10-31
-reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Fixed by moving to pi-coding-agent 0.86.0 or later."
+ignoreUntil = 2026-12-06
+reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Checked 2026-10-06: every release up to 0.80.10 pins the same copy, and the first release that pins none with an advisory is 1.0.1, which the adapter cannot take without changes (AuthStorage is no longer exported since 0.80.8)."
 
 [[IgnoredVulns]]
 id = "GHSA-8xcm-r25x-g524"
-ignoreUntil = 2026-10-31
-reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Fixed by moving to pi-coding-agent 0.86.0 or later."
+ignoreUntil = 2026-12-06
+reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Checked 2026-10-06: every release up to 0.80.10 pins the same copy, and the first release that pins none with an advisory is 1.0.1, which the adapter cannot take without changes (AuthStorage is no longer exported since 0.80.8)."
 
 [[IgnoredVulns]]
 id = "GHSA-jr45-8vmc-qm54"
-ignoreUntil = 2026-10-31
-reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Fixed by moving to pi-coding-agent 0.86.0 or later."
+ignoreUntil = 2026-12-06
+reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Checked 2026-10-06: every release up to 0.80.10 pins the same copy, and the first release that pins none with an advisory is 1.0.1, which the adapter cannot take without changes (AuthStorage is no longer exported since 0.80.8)."
 
 [[IgnoredVulns]]
 id = "GHSA-m8rv-5g2x-5cg5"
-ignoreUntil = 2026-10-31
-reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Fixed by moving to pi-coding-agent 0.86.0 or later."
+ignoreUntil = 2026-12-06
+reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Checked 2026-10-06: every release up to 0.80.10 pins the same copy, and the first release that pins none with an advisory is 1.0.1, which the adapter cannot take without changes (AuthStorage is no longer exported since 0.80.8)."
 
 [[IgnoredVulns]]
 id = "GHSA-pmjh-fq2x-6v4x"
-ignoreUntil = 2026-10-31
-reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Fixed by moving to pi-coding-agent 0.86.0 or later."
+ignoreUntil = 2026-12-06
+reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Checked 2026-10-06: every release up to 0.80.10 pins the same copy, and the first release that pins none with an advisory is 1.0.1, which the adapter cannot take without changes (AuthStorage is no longer exported since 0.80.8)."
 
 [[IgnoredVulns]]
 id = "GHSA-r53p-7pc4-xj5r"
-ignoreUntil = 2026-10-31
-reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Fixed by moving to pi-coding-agent 0.86.0 or later."
+ignoreUntil = 2026-12-06
+reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Checked 2026-10-06: every release up to 0.80.10 pins the same copy, and the first release that pins none with an advisory is 1.0.1, which the adapter cannot take without changes (AuthStorage is no longer exported since 0.80.8)."
 
 [[IgnoredVulns]]
 id = "GHSA-rfgv-xxqx-mfg5"
-ignoreUntil = 2026-10-31
-reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Fixed by moving to pi-coding-agent 0.86.0 or later."
+ignoreUntil = 2026-12-06
+reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Checked 2026-10-06: every release up to 0.80.10 pins the same copy, and the first release that pins none with an advisory is 1.0.1, which the adapter cannot take without changes (AuthStorage is no longer exported since 0.80.8)."
 
 [[IgnoredVulns]]
 id = "GHSA-rx4f-c7p8-82vq"
-ignoreUntil = 2026-10-31
-reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Fixed by moving to pi-coding-agent 0.86.0 or later."
+ignoreUntil = 2026-12-06
+reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Checked 2026-10-06: every release up to 0.80.10 pins the same copy, and the first release that pins none with an advisory is 1.0.1, which the adapter cannot take without changes (AuthStorage is no longer exported since 0.80.8)."
 
 [[IgnoredVulns]]
 id = "GHSA-v3r7-h72x-cjcm"
-ignoreUntil = 2026-10-31
-reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Fixed by moving to pi-coding-agent 0.86.0 or later."
+ignoreUntil = 2026-12-06
+reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Checked 2026-10-06: every release up to 0.80.10 pins the same copy, and the first release that pins none with an advisory is 1.0.1, which the adapter cannot take without changes (AuthStorage is no longer exported since 0.80.8)."
 
 [[IgnoredVulns]]
 id = "GHSA-w293-vg96-wgc3"
-ignoreUntil = 2026-10-31
-reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Fixed by moving to pi-coding-agent 0.86.0 or later."
+ignoreUntil = 2026-12-06
+reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Checked 2026-10-06: every release up to 0.80.10 pins the same copy, and the first release that pins none with an advisory is 1.0.1, which the adapter cannot take without changes (AuthStorage is no longer exported since 0.80.8)."
 
 [[IgnoredVulns]]
 id = "GHSA-6j4f-fj2g-mc7p"
-ignoreUntil = 2026-10-31
-reason = "brace-expansion 5.0.6, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. No pi-coding-agent release carries a patched copy yet: the newest checked, 0.99.1, pins 5.0.9, which this advisory also covers."
+ignoreUntil = 2026-12-06
+reason = "brace-expansion 5.0.6, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Releases up to 1.0.0 pin 5.0.9 at best, which this advisory also covers. Checked 2026-10-06: every release up to 0.80.10 pins the same copy, and the first release that pins none with an advisory is 1.0.1, which the adapter cannot take without changes (AuthStorage is no longer exported since 0.80.8)."
 
 [[IgnoredVulns]]
 id = "GHSA-q2hr-2g5m-vwhr"
-ignoreUntil = 2026-10-31
-reason = "brace-expansion 5.0.6, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. No pi-coding-agent release carries a patched copy yet: the newest checked, 0.99.1, pins 5.0.9, which this advisory also covers."
+ignoreUntil = 2026-12-06
+reason = "brace-expansion 5.0.6, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Releases up to 1.0.0 pin 5.0.9 at best, which this advisory also covers. Checked 2026-10-06: every release up to 0.80.10 pins the same copy, and the first release that pins none with an advisory is 1.0.1, which the adapter cannot take without changes (AuthStorage is no longer exported since 0.80.8)."
 
 [[IgnoredVulns]]
 id = "GHSA-qhr7-859c-m2p7"
-ignoreUntil = 2026-10-31
-reason = "brace-expansion 5.0.6, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. No pi-coding-agent release carries a patched copy yet: the newest checked, 0.99.1, pins 5.0.9, which this advisory also covers."
+ignoreUntil = 2026-12-06
+reason = "brace-expansion 5.0.6, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Releases up to 1.0.0 pin 5.0.9 at best, which this advisory also covers. Checked 2026-10-06: every release up to 0.80.10 pins the same copy, and the first release that pins none with an advisory is 1.0.1, which the adapter cannot take without changes (AuthStorage is no longer exported since 0.80.8)."

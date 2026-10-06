@@ -189,6 +189,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   why the digest it names cannot be pulled or reproduced, and that the image carries ffmpeg and
   why. `docs/releasing.md` states how 1.9.0 and 1.9.1 are published and what such a release
   carries.
+- **`scripts/publish.mjs` can publish from a terminal with a browser-based second factor.** The
+  script ran the publish with piped input and output. An npm account whose two-factor
+  authentication is a passkey or a security key gets an authentication URL from npm, which then
+  waits on the terminal for the approval; behind a pipe npm cannot wait, so the first package failed
+  with `EOTP` and nothing was published. 1.9.0 was therefore published by hand, one tarball after
+  the other. A `--publish` now runs every publish call attached to the terminal the script was
+  started from, and `--otp <code>` hands a one-time code to every call for an account with an
+  authenticator app (refused outside `--publish`). With `--from <dir>` each tarball goes to
+  `npm publish <tarball>` as it is (before: `pnpm publish <tarball>`, which runs the same npm
+  command), and every publish and dry run carries `--access public`, so a scoped package that is
+  new in a release is created public instead of being refused as a restricted one. A publish call
+  that fails no longer ends in a stack trace: the run restores the manifests, names the package
+  and the packages it published before it, says that the same command continues (after a `--from`
+  run) or that the run cannot be continued (when it packed its own bytes), and exits 1; the
+  `--json` summary carries `failed`, the name of that package or `null`. A failed dry run names
+  its package the same way. Continuing is unchanged: a package npm already serves with the
+  integrity of its tarball is skipped, and one it serves with other bytes stops the run before
+  the first publish. The two opt-ins of a real publish (`--yes-really-publish` and
+  `RAYSPEC_ALLOW_PUBLISH=1`), the tag check and every other refusal are unchanged, and the release
+  workflow's publish step runs the same command as before.
+- **`docs/releasing.md` describes publishing from the owner's machine as a supported path.** It was
+  a note that 1.9.0 had been published that way. The runbook now gives the path step by step
+  beside the workflow path: the build pass of the release workflow, downloading its artifacts,
+  verifying them against the release manifest and the identity manifest, publishing the tarballs
+  with `scripts/publish.mjs --publish --from`, checking npm against the manifest, and creating the
+  GitHub release. It says what that path does not produce (npm provenance, a signed manifest, an
+  image in a registry, the evidence document and the managed receipt), and how the approver adds
+  the signature and pushes the tested image archive afterwards.
 
 ### Security
 
@@ -198,6 +226,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same version, and the lockfile, the dependency inventory and the closure SBOM are regenerated.
   RaySpec uses the SDK's `mcp.js` and `streamableHttp.js` only, for the in-process tool server an
   agent backend talks to.
+- **The exceptions for the advisories inside the Pi SDK's shrinkwrap are renewed until
+  2026-12-06; all 22 still apply.** `@rayspec/adapter-pi` depends on
+  `@earendil-works/pi-coding-agent` `0.79.9`, whose `npm-shrinkwrap.json` pins `undici` `8.5.0`
+  (15 advisories), `brace-expansion` `5.0.6` (6) and `protobufjs` `7.6.4` (1) for every consumer;
+  no override reaches them. The exceptions in `osv-scanner.consumer.toml` were set to expire on
+  2026-10-31.
+  Every release of the SDK from `0.79.9` to `1.0.4`, the newest, was checked on 2026-10-06 against
+  the registry and OSV.dev: `0.79.10` to `0.80.10` pin the same three copies; `0.86.0` to `1.0.0`
+  pin `undici` `8.10.2` and `protobufjs` `7.6.6`, which carry no advisory, and `brace-expansion`
+  `5.0.9`, which still carries three; `1.0.1` to `1.0.4` ship no shrinkwrap and depend on `undici`
+  `8.10.2` and `brace-expansion` `5.0.12`, which carry none. So a patched SDK exists, and the
+  adapter cannot take it unchanged: since `0.80.8` the SDK no longer exports `AuthStorage` and
+  takes credentials and models through an asynchronous `modelRuntime` option, and the adapter's
+  recorded fixtures are bound to the SDK version. The adapter stays at `0.79.9` in this release and
+  a consumer install still carries the 22 advisories; the move to the `1.x` SDK is its own change.
+  No exception was added or widened. The same file governs the scan of the runtime image's
+  lockfile in the candidate workflow, which installs the same copies.
 - **The workspace lockfile is clear of the advisories published against `proxy-addr` and
   `source-map-js`.** The root overrides pin `proxy-addr` `2.0.8` (GHSA-jqcg-44mw-7w3h) and
   `source-map-js` `1.2.2` (GHSA-68fv-2mgg-jv7q), the first fixed versions, and the lockfile, the

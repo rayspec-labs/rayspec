@@ -2,15 +2,25 @@
 
 This is the maintainer runbook for a RaySpec release: how a release candidate is built and tested,
 how a candidate or a release is verified, and how the owner publishes. Nothing in this repository
-publishes on its own. The release workflow (`.github/workflows/release.yml`) can make every registry
-write, dispatched by hand from the release tag, signed for by the approver on their own machine and
-approved by a reviewer; its publish steps have not run yet.
+publishes on its own. There are two supported ways to publish a release that the release workflow
+(`.github/workflows/release.yml`) built and tested at its tag:
+
+- **From the workflow** ([Publishing](#publishing)): a second dispatch from the release tag, signed
+  for by the approver on their own machine and approved by a reviewer, makes every registry write.
+  Its publish steps have not run yet.
+- **From the owner's machine**
+  ([Publishing from the owner's machine](#publishing-from-the-owners-machine)): the owner downloads
+  the artifacts the workflow built, verifies them, and publishes those tarballs with
+  `scripts/publish.mjs`. This is how 1.9.0 was published.
+
+Both publish the same tested bytes. They differ in what the release carries besides the packages.
 
 ## How 1.9.0 and 1.9.1 are published
 
 1.9.0 was published by the owner from their own machine with npm, not by the release workflow, and
-1.9.1 is published the same way. What such a release carries differs from the table below in three
-places, and the documentation for users says so ([The runtime image](./runtime-image.md),
+1.9.1 is published the same way
+([Publishing from the owner's machine](#publishing-from-the-owners-machine)). What such a release
+carries differs from the table below in three places, and the documentation for users says so ([The runtime image](./runtime-image.md),
 [Self-hosted deployment](./self-hosted-deployment.md)):
 
 - **No npm provenance attestation.** npm attests provenance only for a publish from a supported CI
@@ -36,7 +46,7 @@ The artifacts of a release the release workflow publishes:
 
 | Artifact | Where | Made by |
 |---|---|---|
-| The npm packages of the publish set (the `rayspec` launcher, `@rayspec/cli`, `@rayspec/server` and every `@rayspec` package they depend on), with npm provenance | npm | `scripts/publish.mjs --publish --from <tarballs>` |
+| The npm packages of the publish set (the `rayspec` launcher, `@rayspec/cli`, `@rayspec/server` and every `@rayspec` package they depend on), with npm provenance | npm | `scripts/publish.mjs --publish --from <tarballs>`, which hands each tarball to `npm publish` |
 | The linux/amd64 runtime image ([The runtime image](./runtime-image.md)) | `ghcr.io/rayspec-labs/rayspec`, by digest | `deployments/runtime-image/Dockerfile` |
 | `release-manifest.json` and `release-manifest.json.sig`: the release catalog of the shared contract, signed by the approver with the Ed25519 release key | GitHub release | `scripts/release-manifest.mjs generate`, `sign` (on the approver's machine) |
 | `release-evidence.json`: everything else, each bound by SHA-256 to the manifest | GitHub release | `scripts/release-manifest.mjs evidence` |
@@ -255,6 +265,156 @@ For each release:
    attached. The artifacts of step 4 are kept for 30 days: sign and publish within that time, or
    build again.
 
+### Publishing from the owner's machine
+
+The same release, published with npm from a terminal instead of by the workflow's second dispatch.
+Steps 1 to 4 above are the same: the candidate, the release pull request, the tag, and the build
+pass (the first dispatch of **Release**, which builds and tests the release's artifacts at the tag
+and publishes nothing). That dispatch needs the `release` environment with its required reviewer;
+it reads neither `NPM_TOKEN` nor the release key. Then, on the owner's machine:
+
+1. **Download the artifacts of the build pass** into an empty directory:
+
+   ```bash
+   gh run download <run id> --name release-candidate --dir release-candidate
+   ```
+
+   It holds `tarballs/`, `release-manifest.json`, `rayspec-release-identity.json`,
+   `closure-sbom.cdx.json` and `image/` (the image archive, its SBOM and its lockfile). The artifact
+   is kept for 30 days.
+
+2. **Verify them**, from a checkout of the tag with `pnpm install --frozen-lockfile && pnpm build`
+   run (`git status` shows nothing, `git describe --exact-match` prints `v1.9.1`):
+
+   ```bash
+   # The release manifest against the tarballs and the image archive it names.
+   node scripts/release-manifest.mjs verify --manifest release-candidate/release-manifest.json \
+     --tarballs release-candidate/tarballs --image-oci release-candidate/image/rayspec-runtime.oci.tar
+
+   # The identity manifest against the tarballs and against this checkout.
+   node scripts/release-identity.mjs --verify --tarballs release-candidate/tarballs \
+     --manifest release-candidate/rayspec-release-identity.json
+   ```
+
+   Both must report no failure. Publish nothing otherwise.
+
+3. **Publish the tarballs** with the script, from a terminal (not through a pipe, a script runner
+   or a CI job), signed in to npm as the publishing account (`npm whoami`):
+
+   ```bash
+   RAYSPEC_ALLOW_PUBLISH=1 node scripts/publish.mjs --publish --yes-really-publish \
+     --version 1.9.1 --from release-candidate/tarballs
+   ```
+
+   The script refuses unless the tag `v1.9.1` is annotated and points at the checkout, and unless
+   the directory holds exactly one tarball per package of the publish set at that version. It then
+   asks npm for each package's integrity and hands each tarball that is not on npm yet to
+   `npm publish <tarball> --access public`, in dependency order, the `rayspec` launcher last. The
+   packed files are published as they are; nothing is packed again.
+
+   Each `npm publish` runs attached to your terminal. With a passkey or a security key as the
+   account's second factor, npm prints an authentication URL and waits: open it, approve in the
+   browser, and the publish goes on. npm can ask again for a later package (its approval page
+   offers to remember an approval for a few minutes only), so stay at the terminal until the
+   launcher is through. An account with an authenticator app passes its current code instead with
+   `--otp <code>`; the code goes to every publish call and expires within about a minute, so the
+   run stops when npm refuses it and the next run takes a new code.
+
+   When a publish fails, the script names the package and the packages this run published before
+   it, and exits 1. Fix the cause and run the same command again: every package npm already serves
+   with the integrity of its tarball is skipped and the rest are published. A package npm serves
+   with other bytes stops the run before anything is published, and the release then moves to the
+   next version. Never publish a tarball by hand under a version that is partly public: the script
+   compares the bytes, a hand does not.
+
+4. **Check that npm serves what the manifest lists**, every package at its integrity:
+
+   ```bash
+   node --input-type=module -e "
+     import { execFileSync } from 'node:child_process';
+     import { readFileSync } from 'node:fs';
+     const m = JSON.parse(readFileSync('release-candidate/release-manifest.json', 'utf8'));
+     let bad = 0;
+     for (const p of m.packages) {
+       const served = execFileSync('npm', ['view', p.name + '@' + p.version, 'dist.integrity', '--prefer-online'], { encoding: 'utf8' }).trim();
+       if (served !== p.integrity) { console.error(p.name + ': the registry serves ' + (served || 'nothing')); bad++; }
+     }
+     if (bad > 0) process.exit(1);
+     console.log(m.packages.length + ' packages resolve to the integrity the manifest names');
+   "
+   ```
+
+   The registry can take a minute to serve a version it has just accepted; a package it does not
+   serve yet fails the check, so run it again before concluding anything.
+
+5. **Create the GitHub release** from the tag, with the tested artifacts attached:
+
+   ```bash
+   gh release create v1.9.1 --verify-tag --title "RaySpec 1.9.1" \
+     --notes "See CHANGELOG.md and docs/releasing.md. Published from the owner's machine: no npm provenance, an unsigned release manifest, no image in a registry." \
+     release-candidate/release-manifest.json \
+     release-candidate/rayspec-release-identity.json \
+     release-candidate/closure-sbom.cdx.json \
+     release-candidate/tarballs/*.tgz
+   ```
+
+#### What this path does not produce
+
+- **npm provenance.** npm attests provenance only for a publish from a supported CI workflow, and
+  an attestation cannot be added to a version afterwards. The packages of such a release carry
+  none; the first release with provenance is the first one the workflow publishes.
+- **A signed release manifest**, unless the approver signs it by hand (below). The unsigned
+  manifest shows which bytes the release build made; it does not show who published them.
+- **An image in a registry.** The release build built and tested the image; nothing pushed it.
+  Users build the image from the release's tarballs
+  ([Getting the image](./runtime-image.md#getting-the-image)).
+- **`release-evidence.json` and `managed-receipt.json`.** The workflow's publish job writes them
+  from the signature and the certification lane of the build pass; the local path does not.
+
+The user documentation says the first three for 1.9.0 and 1.9.1. When a release adds the signature
+or the image afterwards, change those pages in the same change
+([The runtime image](./runtime-image.md), [Self-hosted deployment](./self-hosted-deployment.md), and
+[How 1.9.0 and 1.9.1 are published](#how-190-and-191-are-published) above).
+
+#### Adding the signature afterwards
+
+The approver signs the manifest of the build pass with the release key, on their machine, and
+attaches the signature file to the GitHub release. The manifest must be the file that is attached
+to the release, byte for byte: the signature names its SHA-256.
+
+```bash
+node scripts/release-manifest.mjs sign --manifest release-candidate/release-manifest.json \
+  --key-file release-key.pem --trusted-key release-key.pub.pem
+gh release upload v1.9.1 release-candidate/release-manifest.json.sig
+```
+
+The public key has to be published where integrators read it
+([Publishing](#publishing), step 2 of the one-time setup); a signature nobody can check against a
+key they trust adds nothing. From then on the release verifies with `--signature` and
+`--trusted-key` ([Verifying a release](#verifying-a-release)).
+
+#### Pushing the image afterwards
+
+The image archive of the build pass is the image the release build tested and the manifest names
+by digest. Copy it without conversion, so the registry serves that digest, and compare:
+
+```bash
+repository="$(node -p "require('./release-candidate/release-manifest.json').images[0].repository")"
+digest="$(node -p "require('./release-candidate/release-manifest.json').images[0].digest")"
+skopeo login ghcr.io --username <github user>      # a token with write:packages
+skopeo copy --preserve-digests \
+  oci-archive:release-candidate/image/rayspec-runtime.oci.tar "docker://${repository}:1.9.1"
+# shasum is the macOS tool; on Linux use sha256sum.
+served="sha256:$(skopeo inspect --raw "docker://${repository}@${digest}" | shasum -a 256 | cut -d' ' -f1)"
+[ "${served}" = "${digest}" ] && echo "the registry serves ${digest}"
+```
+
+Push only the archive of the build pass: an image built again from the tarballs has another digest
+than the one the manifest names. Make the package public in the repository's package settings, and
+attach `release-candidate/image/image-sbom.cdx.json` and the image's lockfile
+(`release-candidate/image/lock/package-lock.json`, as `image-package-lock.json`) to the GitHub
+release with `gh release upload`.
+
 ### When a release fails
 
 - **Before the publish step:** nothing reached a registry. Fix the cause, and dispatch again (a new
@@ -266,7 +426,10 @@ For each release:
   the launcher is not on npm, and `publish.mjs --from` skips every package npm already serves with
   the integrity of its tarball, publishes the rest with provenance from the workflow, and refuses
   before the first call when npm serves a package with other bytes (then move to the next version).
-  Do not publish the rest from a workstation: a publish outside the workflow carries no provenance.
+  Do not finish a workflow release from a workstation: a publish outside the workflow carries no
+  provenance, and the release would carry it for some packages only. A release published from the
+  owner's machine continues there, with the same command
+  ([Publishing from the owner's machine](#publishing-from-the-owners-machine), step 3).
 - **During the image push or the release creation:** the npm packages are public. The image archive
   and the signed documents are the workflow's artifacts: push the archive with
   `skopeo copy --preserve-digests oci-archive:rayspec-runtime.oci.tar docker://ghcr.io/rayspec-labs/rayspec:1.9.0`
