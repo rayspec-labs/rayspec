@@ -725,7 +725,7 @@ encrypted and are not read.
   with and without the line: the envelope's warning codes are a closed list of
   the bundle contract, which has no code for a host tool. Verify on the host
   that will serve the bundle for the line to mean anything; the
-  [runtime image](./runtime-image.md) carries both tools.
+  [runtime image](./runtime-image.md) carries both tools from 1.9.1.
 - **Flags:** `--runtime <exact-version>` (default: this CLI's version);
   `--signature <file.ray.sig>` (default: `<file.ray>.sig` when present);
   `--trusted-key <ed25519-public-key.pem>`, repeatable — a PEM public key; a
