@@ -142,6 +142,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **`@modelcontextprotocol/sdk` moves to `1.31.0`, the first version outside GHSA-6qxp-vccf-f47h.**
+  `@rayspec/adapter-codex` pins the SDK exactly, so a `1.9.0` install carries `1.29.0`; upgrade
+  to take the fixed version. The root overrides hold the other adapters' transitive copies at the
+  same version, and the lockfile, the dependency inventory and the closure SBOM are regenerated.
+  RaySpec uses the SDK's `mcp.js` and `streamableHttp.js` only, for the in-process tool server an
+  agent backend talks to.
 - **The workspace lockfile is clear of the advisories published against `proxy-addr` and
   `source-map-js`.** The root overrides pin `proxy-addr` `2.0.8` (GHSA-jqcg-44mw-7w3h) and
   `source-map-js` `1.2.2` (GHSA-68fv-2mgg-jv7q), the first fixed versions, and the lockfile, the
