@@ -2576,8 +2576,7 @@ a provider credential — in development, in tests, in a demo. **It is not an
 extraction model and is unsuitable for production extraction**: it reads labelled
 lines and nothing else.
 
-An extractor uses it only when its config selects it, and both sides have to say
-so:
+An extractor uses it when its config selects it, and both sides have to say so:
 
 ```json
 {
@@ -2595,7 +2594,9 @@ so:
   refused at boot: the provider never answers a run that asked for a model.
 - Under `RAYSPEC_EXTRACTION_MODE=deterministic` a config that names a real backend
   (`openai`, …) is refused at boot rather than answered by the provider, so it
-  never stands in for a provider the application chose.
+  never stands in for a provider the application chose — unless the operator
+  allows that for the boot with `RAYSPEC_EXTRACTION_DETERMINISTIC_STAND_IN=true`
+  ([below](#standing-in-for-a-configured-backend)).
 - `RAYSPEC_HOSTING_POSTURE=managed` refuses it: its capability,
   `extraction-deterministic`, is test-only.
 - The runtime provides the capability, so a bundle cannot require it: the runtime-control
@@ -2629,6 +2630,155 @@ always gives the same record. A test or an embedder that injects its own
 deterministic executor (`assembleServer(config, { productDeterministicAgents })`)
 replaces the provider for every extractor.
 [`examples/document-intake`](../examples/document-intake/README.md) runs on it.
+
+#### Standing in for a configured backend
+
+A product's committed extraction config names its production backend, model and
+prompt. To run that product without a model credential — a CI job of the product
+repository, a demo — the operator sets, for that boot:
+
+```bash
+RAYSPEC_EXTRACTION_MODE=deterministic
+RAYSPEC_EXTRACTION_DETERMINISTIC_STAND_IN=true
+```
+
+`RAYSPEC_EXTRACTION_DETERMINISTIC_STAND_IN` takes `true` or `false`; unset or
+blank is `false`, and any other value refuses the boot. It is read only for a
+document that declares extractors. With `true`, under
+`RAYSPEC_EXTRACTION_MODE=deterministic`:
+
+- An extractor whose config says `"backend": "deterministic"` runs exactly as
+  described above.
+- An extractor whose config names any other backend is a **stand-in**: the
+  deterministic provider answers for it. The config is read for `agent_id`
+  (which must be the extractor's id) and `schema_file` (required, inside the
+  config's directory) and for nothing else: `model`, `prompt_file`,
+  `output_schema_name`, `structured_output_mode`, `input_context` and any other
+  key are left unread. No backend is constructed, no credential is asked for, no
+  prompt file or `instructions_ref` is opened, and nothing leaves the process.
+  The committed file is not modified and need not be copied.
+- The boot banner names every stand-in and the backend its config names.
+
+`true` under `RAYSPEC_EXTRACTION_MODE=live` refuses the boot: a live run calls
+the configured backends, so the two settings contradict each other.
+`RAYSPEC_HOSTING_POSTURE=managed` refuses `true` as well. An executor injected
+by a test or an embedder still replaces the provider, and the variable is then
+not read.
+
+**A stand-in also reads transcript spans.** Besides text inputs it reads an input
+artifact that is a span set — a non-empty array of objects that each have a
+string `id` and a string `text`, which is what `stt.transcribe_session` emits.
+Each span contributes the lines of its `text`, in order, and a labelled line
+remembers the span it came from. Inside an array-of-objects property, an item
+property that is one of the document's evidence fields (the
+`artifacts[].provenance.evidence_field` names) and is an array of strings takes
+no `|` part: it receives the id of the span its line was read from, or `[]` for
+a line that came from a text input. So with a transcript whose fourth `mic`
+segment reads `items: Keep the upload API stable.`, an output property
+
+```json
+"items": { "type": "array", "items": { "type": "object", "properties": {
+  "text": { "type": "string" },
+  "evidence": { "type": "array", "items": { "type": "string" } } } } }
+```
+
+becomes `[{ "text": "Keep the upload API stable.", "evidence": ["mic:s3"] }]`.
+The citation is true by construction, it is in the closed span set, and a
+declared `quote_field` is a verbatim run of the cited span, so grounding,
+validation and persistence run as they do for a model's answer. Top-level
+scalars are still filled by the first line that converts. An extractor whose own
+config selects `deterministic` does not read spans: only a stand-in does.
+
+A bundle packed from a config that names a real backend still declares that
+backend's provider binding as required, and a deploy of the bundle blocks until
+the binding has a value. For a stand-in run, supply any placeholder value:
+nothing reads it.
+
+### Fixtures for the fake speech-to-text adapter
+
+`STT_PROVIDER=fake` selects the fake adapter: no audio is read and no provider is
+called. On its own it has no fixtures, so every recording ends its workflow at
+transcription (`stt_adapter_error: No fake STT fixture for <session_id>/<track>.`).
+Two environment variables give it something to answer with. Both are read once,
+at boot, only under `STT_PROVIDER=fake` and only for a document that declares an
+`stt.*` step; with neither set, the adapter behaves as it always did.
+
+**`RAYSPEC_STT_FAKE_FIXTURES`** names a directory (resolved against the working
+directory; blank counts as unset). Every regular file directly in it whose name
+ends in `.json` is one fixture. Other files, subdirectories and symbolic links
+are ignored, and files load in the order of their names. A fixture is the
+transcript of the tracks of one session:
+
+```json
+{
+  "session_id": "demo-session",
+  "tracks": [
+    {
+      "track": "mic",
+      "segments": [
+        { "text": "headline: The upload API stays stable." },
+        { "text": "items: Keep the upload API stable.", "start": 4.2, "end": 7.9 }
+      ]
+    },
+    { "track": "system", "segments": [{ "text": "labels: The client moves later." }] }
+  ]
+}
+```
+
+| Key | Rule |
+| --- | --- |
+| `session_id` | Required, a non-empty string. `"*"` answers **any** session; `*` cannot be a real session id. |
+| `fixture_id` | Optional non-empty string; the file name without `.json` when absent. |
+| `tracks` | Required, a non-empty array. `track` is a non-empty string, unique within the file. |
+| `tracks[].status` | Optional; when present it must be `completed`. |
+| `tracks[].segments` | Required, a non-empty array. Each segment becomes one span. |
+| `segments[].text` | Required, a non-empty string. |
+| `segments[].span_id` | Optional non-empty string, unique within the track; `<track>:s<index>` when absent. |
+| `segments[].start`, `.end` | Optional numbers from 0, with `end` at or after `start`; `index × 5` and `(index + 1) × 5` seconds when absent. |
+| any other key | Ignored. |
+
+For a recording's session and track the adapter answers, in this order, from:
+
+1. a fixture whose `session_id` is the recording's and that holds the track;
+2. a fixture whose `session_id` is `*` and that holds the track, as a transcript
+   of the recording's session;
+3. the fixed transcript, when `RAYSPEC_STT_FAKE_FALLBACK=fixed`;
+4. nothing: the recording fails with the error above.
+
+A fixture for the session that lacks the track does not stop steps 2 and 3 for
+that track. The session and track ids of a request are only ever compared with
+the ids the loaded fixtures declare: no path is built from them and nothing is
+read from disk after boot.
+
+**`RAYSPEC_STT_FAKE_FALLBACK=fixed`** answers a recording nothing else matches
+with a fixed transcript of two spans, `<track>:s0` (`This is the fixed transcript
+of the fake speech-to-text adapter.`) and `<track>:s1` (`No audio was read and
+no provider was called.`). It works with or without a fixture directory. It
+carries no labelled line, so it takes a recording to a readable transcript; an
+extractor whose output shape requires a field then fails at its own step, as an
+incomplete model answer would. A run through to persisted artifacts uses a
+fixture with labelled lines. `fixed` is the only value; unset or blank means no
+fallback.
+
+The boot refuses, before it changes anything:
+
+| Case | Refusal |
+| --- | --- |
+| the directory is missing, is a file, or cannot be listed | `RAYSPEC_STT_FAKE_FIXTURES '<path>' is not a readable directory.` |
+| it holds no `.json` file | `RAYSPEC_STT_FAKE_FIXTURES '<path>' holds no .json fixture file.` |
+| a file is unreadable, is not JSON, or breaks a rule of the table | `fake STT fixture <file>: <why>.` |
+| two files hold the same session and track | `fake STT fixtures <a> and <b> both answer <session_id>/<track>.` |
+| `RAYSPEC_STT_FAKE_FALLBACK` is not `fixed` | `RAYSPEC_STT_FAKE_FALLBACK '<value>' is not supported …` |
+| either variable is set while `STT_PROVIDER` is not `fake` | `<VARIABLE> is set, but STT_PROVIDER is '<provider>': it configures the fake adapter only.` |
+| either variable is set under `RAYSPEC_HOSTING_POSTURE=managed` | `RAYSPEC_HOSTING_POSTURE=managed does not support <VARIABLE> …` |
+
+The boot banner says how many fixture files answer and whether the fallback is
+on. The fake adapter emits a fixture's segments as written whatever
+[`span_granularity`](#span_granularity-on-stt) says, so a fixture for a
+sentence-granular product writes sentence-sized segments. A fixture directory is
+deployment configuration, not part of a bundle: `rayspec pack` does not carry
+it. [`examples/acme-notes/stt-fixtures`](../examples/acme-notes/stt-fixtures/default.json)
+is the fixture the [getting-started walkthrough](./getting-started.md) runs on.
 
 ## `workflows`
 

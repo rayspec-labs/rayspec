@@ -35,6 +35,15 @@ import type {
  * takes `true`/`false`/`yes`/`no` in any letter case. Nothing else is accepted: no thousands
  * separators, no currency symbols, no dates parsed or normalized.
  *
+ * TRANSCRIPT SPANS — only for a handler built with `spanSets`. It then also reads an input artifact
+ * whose value is a non-empty array of objects that each carry a string `id` and a string `text`: a
+ * span set. Each span contributes the lines of its `text`, in array order, and a labelled line found
+ * there remembers the `id` of its span. Inside an array-of-objects property, an item property that
+ * is named in `spanSets.idFields` and is an array of strings takes no `|` part: it receives the id
+ * of the span its line was read from, as a one-element array, or `[]` for a line that came from a
+ * text input. A claim so cites exactly the span it was read from. Without `spanSets` a span array
+ * is one of the ignored inputs and such an item property drops its line, as any other shape does.
+ *
  * DETERMINISTIC. The same inputs give the same output: no clock, no randomness, no network.
  */
 
@@ -118,17 +127,48 @@ export function normalizeLabel(label: string): string {
   return joined.slice(start, end);
 }
 
-/** The labelled lines of `text`, as [normalized label, trimmed value] pairs in document order. */
-function labelledLines(text: string): [string, string][] {
-  const out: [string, string][] = [];
+/** One labelled line: its normalized label, its trimmed value, and the span it was read from. */
+interface LabelledLine {
+  readonly label: string;
+  readonly value: string;
+  /** The id of the transcript span the line came from; undefined for a line of a text input. */
+  readonly spanId?: string;
+}
+
+/** The labelled lines of `text` in document order, each remembering `spanId` when one is given. */
+function labelledLines(text: string, spanId?: string): LabelledLine[] {
+  const out: LabelledLine[] = [];
   for (const line of text.split(/\r?\n/)) {
     const colon = line.indexOf(':');
     if (colon <= 0) continue;
     const label = normalizeLabel(line.slice(0, colon));
     if (label === '') continue;
-    out.push([label, line.slice(colon + 1).trim()]);
+    out.push({
+      label,
+      value: line.slice(colon + 1).trim(),
+      ...(spanId === undefined ? {} : { spanId }),
+    });
   }
   return out;
+}
+
+/** Which item properties receive the id of the span a line was read from. */
+export interface DeterministicExtractionSpanSets {
+  /** The names of the item properties that cite spans (a product's evidence fields). */
+  readonly idFields: readonly string[];
+}
+
+/** What a handler is built with beyond its output schema. */
+export interface DeterministicExtractionOptions {
+  /** Present ⇒ the handler reads transcript span sets and fills the named id fields. */
+  readonly spanSets?: DeterministicExtractionSpanSets;
+}
+
+/** Whether a schema node is an array of strings: the shape of a field that cites span ids. */
+function isStringArray(node: Readonly<Record<string, unknown>>): boolean {
+  return (
+    typesOf(node).includes('array') && isRecord(node.items) && scalarOf(node.items) === 'string'
+  );
 }
 
 const INTEGER = /^[+-]?\d+$/;
@@ -159,18 +199,27 @@ function convert(raw: string, type: Scalar): unknown {
   }
 }
 
-/** One array item of object shape from a `|`-separated value; undefined when the line is dropped. */
+/**
+ * One array item of object shape from a `|`-separated value; undefined when the line is dropped.
+ * With `idFields`, a property named there that is an array of strings consumes no part and cites
+ * the line's span.
+ */
 function objectItem(
-  raw: string,
+  line: LabelledLine,
   itemProperties: Readonly<Record<string, unknown>>,
+  idFields: readonly string[] | undefined,
 ): Record<string, unknown> | undefined {
-  const parts = raw.split('|');
+  const parts = line.value.split('|');
   const item: Record<string, unknown> = {};
   let index = 0;
   for (const [name, node] of Object.entries(itemProperties)) {
+    const schemaNode = isRecord(node) ? node : {};
+    if (idFields?.includes(name) && isStringArray(schemaNode)) {
+      item[name] = line.spanId === undefined ? [] : [line.spanId];
+      continue;
+    }
     const part = parts[index];
     index += 1;
-    const schemaNode = isRecord(node) ? node : {};
     const type = scalarOf(schemaNode);
     const converted =
       part === undefined || type === undefined || part.trim() === ''
@@ -188,12 +237,20 @@ export function extractLabelledRecord(
   text: string,
   schema: DeterministicExtractionSchema,
 ): Record<string, unknown> {
-  const lines = labelledLines(text);
-  const valuesOf = (name: string) =>
-    lines.filter(([label]) => label === name).map(([, value]) => value);
+  return recordFromLines(labelledLines(text), schema, undefined);
+}
+
+/** The record `lines` give for `schema`; `idFields` are the item properties that cite spans. */
+function recordFromLines(
+  lines: readonly LabelledLine[],
+  schema: DeterministicExtractionSchema,
+  idFields: readonly string[] | undefined,
+): Record<string, unknown> {
   const record: Record<string, unknown> = {};
   for (const [name, node] of Object.entries(schema.properties)) {
-    const values = valuesOf(normalizeLabel(name));
+    const label = normalizeLabel(name);
+    const matching = lines.filter((line) => line.label === label);
+    const values = matching.map((line) => line.value);
     const scalar = scalarOf(node);
     if (scalar !== undefined) {
       const found = values.map((v) => convert(v, scalar)).find((v) => v !== undefined);
@@ -210,8 +267,8 @@ export function extractLabelledRecord(
       }
       if (typesOf(items).includes('object') && isRecord(items.properties)) {
         const itemProperties = items.properties;
-        record[name] = values
-          .map((v) => objectItem(v, itemProperties))
+        record[name] = matching
+          .map((line) => objectItem(line, itemProperties, idFields))
           .filter((v): v is Record<string, unknown> => v !== undefined);
         continue;
       }
@@ -232,20 +289,54 @@ export function inputText(input: AgentRuntimeExecutionInput): string {
   return texts.join('\n');
 }
 
+/** The spans of `value` when it is a span set: a non-empty array of `{ id, text }` objects. */
+function spanSetOf(value: unknown): { id: string; text: string }[] | undefined {
+  if (!Array.isArray(value) || value.length === 0) return undefined;
+  const spans: { id: string; text: string }[] = [];
+  for (const element of value) {
+    if (!isRecord(element) || typeof element.id !== 'string' || typeof element.text !== 'string') {
+      return undefined;
+    }
+    spans.push({ id: element.id, text: element.text });
+  }
+  return spans;
+}
+
+/** The labelled lines the step's inputs carry, in declared order: text inputs and span sets. */
+function inputLines(input: AgentRuntimeExecutionInput): LabelledLine[] {
+  const lines: LabelledLine[] = [];
+  for (const artifact of input.artifact_inputs) {
+    const value = artifact.value;
+    if (typeof value === 'string') lines.push(...labelledLines(value));
+    else if (isRecord(value) && typeof value.content === 'string') {
+      lines.push(...labelledLines(value.content));
+    } else {
+      for (const span of spanSetOf(value) ?? []) lines.push(...labelledLines(span.text, span.id));
+    }
+  }
+  return lines;
+}
+
 /**
  * The provider's handler for one extractor, shaped by that extractor's output schema. It writes the
  * record onto the output artifact whose `schema_ref` is the step's required output shape, or the
- * first declared output when none matches.
+ * first declared output when none matches. With `options.spanSets` it also reads transcript span
+ * sets and cites them (see the header); without it the handler reads text inputs only.
  */
 export function deterministicExtractionHandler(
   schema: DeterministicExtractionSchema,
+  options: DeterministicExtractionOptions = {},
 ): FakeAgentHandler {
+  const spanSets = options.spanSets;
   return (input) => {
     const output =
       input.artifact_outputs.find((a) => a.schema_ref === input.required_output_shape.schema_ref) ??
       input.artifact_outputs[0];
     if (!output) return [];
-    const value = extractLabelledRecord(inputText(input), schema);
+    const value =
+      spanSets === undefined
+        ? extractLabelledRecord(inputText(input), schema)
+        : recordFromLines(inputLines(input), schema, spanSets.idFields);
     return [{ ...output, value }] satisfies AgentRuntimeOutputArtifact[];
   };
 }

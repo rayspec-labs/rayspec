@@ -139,6 +139,7 @@ import {
 import {
   FakeSttAdapter,
   type SttAdapter,
+  type SttDualTrackFixture,
   type SttFinalizedTrackRef,
   SttMediaResolutionError,
   type SttMediaResolver,
@@ -156,12 +157,15 @@ import {
   CODEX_HOME,
   DEEPGRAM_API_KEY,
   declaresSttStep,
+  EXTRACTION_DETERMINISTIC_STAND_IN,
   EXTRACTION_MODE,
   NORMALIZE_MODE,
   OPENAI_API_KEY_FOR_OPENAI,
   OPENAI_API_KEY_FOR_PI,
   PRODUCT_TENANT_ID,
   RESPONDER_MODE,
+  STT_FAKE_FALLBACK,
+  STT_FAKE_FIXTURES,
   STT_PROVIDER,
 } from './boot-env-demands.js';
 import {
@@ -172,6 +176,7 @@ import {
 } from './composition-root.js';
 import { type ProductMigrationApply, RuntimeApplyError } from './deploy-apply.js';
 import { deriveDbosApplicationVersion } from './durable-app-version.js';
+import { FakeSttFixturesError, loadFakeSttFixtures } from './fake-stt-fixtures.js';
 import { durableWorkerReadiness, type ReadinessProbe } from './health.js';
 import {
   isProviderCredentialName,
@@ -717,6 +722,12 @@ export function mediaPrepEnabled(env: NodeJS.ProcessEnv): boolean {
  * legitimately uses these. Only the ENV-selected fake counts — an INJECTED test adapter (`hasInjectedStt`)
  * is a deliberate dev/CI seam, not a prod misconfig. `responderMode` is passed only when the doc
  * declares `conversation_input` (empty otherwise — the env is not even read for a non-conversation doc).
+ *
+ * `keyless` is what the settings of a run without provider keys resolved to at this boot: the fake
+ * adapter's fixture files and fallback, and the extractors the deterministic provider answers for in
+ * place of a configured backend. Each one is named on its own line, so the banner says what answers
+ * a recording and an extraction instead of only that the real provider does not. Absent or empty ⇒
+ * every line is the text it always was.
  */
 export function nonRealProviderBanner(
   env: NodeJS.ProcessEnv,
@@ -724,16 +735,25 @@ export function nonRealProviderBanner(
   extractionMode: string,
   responderMode = '',
   normalizeMode = '',
+  keyless: KeylessRunSettings = {},
 ): string | null {
   const parts: string[] = [];
   if (!hasInjectedStt && env.STT_PROVIDER?.trim() === 'fake') {
-    parts.push('STT_PROVIDER=fake (no real transcription — recordings will not transcribe)');
+    parts.push(`STT_PROVIDER=fake (no real transcription — ${fakeSttBannerClause(keyless)})`);
   }
   if (extractionMode === 'deterministic') {
     parts.push(
       'RAYSPEC_EXTRACTION_MODE=deterministic (no real extraction model — the deterministic ' +
         'provider reads labelled lines and is not for production extraction)',
     );
+    const standIns = keyless.standIns ?? [];
+    if (standIns.length > 0) {
+      parts.push(
+        `${EXTRACTION_DETERMINISTIC_STAND_IN.name}=true (the deterministic provider answers for ` +
+          `${standIns.map((s) => `${s.id} (config backend '${s.backend}')`).join(', ')}; no ` +
+          'configured backend is called)',
+      );
+    }
   }
   if (responderMode === 'deterministic') {
     parts.push(
@@ -753,6 +773,36 @@ export function nonRealProviderBanner(
     `    ${parts.join('\n    ')}\n` +
     '    This is a DEV/CI posture — NOT a production configuration. If this is prod, fix the env.\n'
   );
+}
+
+/** An extractor the deterministic provider answers for in place of the backend its config names. */
+export interface ExtractionStandIn {
+  readonly id: string;
+  readonly backend: string;
+}
+
+/** What the settings of a run without provider keys resolved to at one boot (for the banner). */
+export interface KeylessRunSettings {
+  /** How many fixture files `RAYSPEC_STT_FAKE_FIXTURES` loaded; absent ⇒ the variable is unset. */
+  readonly sttFixtureFiles?: number;
+  /** Whether `RAYSPEC_STT_FAKE_FALLBACK=fixed` is selected. */
+  readonly sttFallback?: boolean;
+  /** The extractors answered under `RAYSPEC_EXTRACTION_DETERMINISTIC_STAND_IN=true`. */
+  readonly standIns?: readonly ExtractionStandIn[];
+}
+
+/** What the fake speech adapter does with a recording, as the banner states it. */
+function fakeSttBannerClause(keyless: KeylessRunSettings): string {
+  const fallback = `${STT_FAKE_FALLBACK.name}=fixed`;
+  if (keyless.sttFixtureFiles === undefined) {
+    return keyless.sttFallback
+      ? `every recording gets the fixed transcript, ${fallback}`
+      : 'recordings will not transcribe';
+  }
+  const fixtures = `${STT_FAKE_FIXTURES.name} answers from ${keyless.sttFixtureFiles} fixture file(s)`;
+  return keyless.sttFallback
+    ? `${fixtures}; every other recording gets the fixed transcript, ${fallback}`
+    : `${fixtures}; a recording none of them matches will not transcribe`;
 }
 
 // ── STT ────────────────────────────────────────────────────────────────────────────────────────
@@ -804,27 +854,105 @@ function selectSttProvider(
   );
 }
 
+/** The two settings of the fake speech adapter, in the order a refusal checks them. */
+const FAKE_STT_SETTINGS: readonly BootEnvVar[] = [STT_FAKE_FIXTURES, STT_FAKE_FALLBACK];
+
+/** A setting's value, trimmed; undefined when it is unset or blank. */
+function settingOf(env: NodeJS.ProcessEnv, variable: BootEnvVar): string | undefined {
+  const value = env[variable.name]?.trim();
+  return value === undefined || value === '' ? undefined : value;
+}
+
+/**
+ * What the fake speech adapter answers recordings from, read from the environment once, at boot:
+ * `RAYSPEC_STT_FAKE_FIXTURES` (a directory of fixture files) and `RAYSPEC_STT_FAKE_FALLBACK`
+ * (`fixed` ⇒ the fixed transcript for a recording no fixture matches). Neither set ⇒ no fixtures
+ * and no fallback, the adapter this boot always built. A directory that cannot be read or holds a
+ * malformed fixture, and an unsupported fallback, refuse the boot here rather than at the first
+ * recording.
+ */
+export function resolveFakeSttSettings(env: NodeJS.ProcessEnv): {
+  fixtures: SttDualTrackFixture[];
+  fallback: 'fixed' | undefined;
+  /** What the banner reports; empty when neither variable is set. */
+  keyless: KeylessRunSettings;
+} {
+  const fallbackValue = settingOf(env, STT_FAKE_FALLBACK);
+  if (fallbackValue !== undefined && fallbackValue !== 'fixed') {
+    throw new ProductBootError(
+      `${STT_FAKE_FALLBACK.name} '${fallbackValue}' is not supported (wired: fixed; unset or ` +
+        'blank ⇒ no fallback). Fail-closed.',
+    );
+  }
+  const fallback = fallbackValue === 'fixed' ? ('fixed' as const) : undefined;
+  const dir = settingOf(env, STT_FAKE_FIXTURES);
+  if (dir === undefined) {
+    return { fixtures: [], fallback, keyless: fallback ? { sttFallback: true } : {} };
+  }
+  try {
+    const loaded = loadFakeSttFixtures(dir);
+    return {
+      fixtures: loaded.fixtures,
+      fallback,
+      keyless: { sttFixtureFiles: loaded.files.length, ...(fallback ? { sttFallback: true } : {}) },
+    };
+  } catch (e) {
+    if (e instanceof FakeSttFixturesError) throw new ProductBootError(e.message);
+    throw e;
+  }
+}
+
+/** The speech adapter the environment selects, and what the banner says about a fake one. */
+function selectSttAdapter(
+  env: NodeJS.ProcessEnv,
+  blob: ReturnType<BlobStoreFactory>,
+  defaultModel: string | undefined,
+  spanGranularity: SttSpanGranularity,
+): { adapter: SttAdapter; keyless: KeylessRunSettings } {
+  const selected = selectSttProvider(env);
+  if (selected.provider === 'fake') {
+    // The fake adapter emits a fixture's segments as written, one span each: the granularity of a
+    // keyless run is whatever its fixtures hold, so the setting has nothing to configure here.
+    const { fixtures, fallback, keyless } = resolveFakeSttSettings(env);
+    return {
+      adapter: new FakeSttAdapter({ fixtures, ...(fallback ? { fallback } : {}) }),
+      keyless,
+    };
+  }
+  // A setting of the fake adapter beside a real provider would be silently inert: refuse it, so a
+  // deployment never believes fixtures answer while a provider is being called (or the reverse).
+  for (const setting of FAKE_STT_SETTINGS) {
+    if (settingOf(env, setting) !== undefined) {
+      throw new ProductBootError(
+        `${setting.name} is set, but ${STT_PROVIDER.name} is '${selected.provider}': it ` +
+          `configures the fake adapter only. Unset it, or select ${STT_PROVIDER.name}=fake. ` +
+          'Fail-closed.',
+      );
+    }
+  }
+  // The execution policy's provider-call timeout bounds every transcription request.
+  const timeoutMs = resolveAgentRequestTimeoutMs(env);
+  return {
+    adapter: new DeepgramSttAdapter({
+      apiKey: selected.apiKey,
+      ...(timeoutMs === undefined ? {} : { timeoutMs }),
+      ...(defaultModel ? { model: defaultModel } : {}),
+      // Passed only when the document asks for sentences: a document that does not declare the
+      // setting constructs the adapter with exactly the options it always got.
+      ...(spanGranularity === 'sentence' ? { spanGranularity } : {}),
+      resolver: new BlobRemuxSttMediaResolver(blob),
+    }),
+    keyless: {},
+  };
+}
+
 export function buildSttAdapter(
   env: NodeJS.ProcessEnv,
   blob: ReturnType<BlobStoreFactory>,
   defaultModel: string | undefined,
   spanGranularity: SttSpanGranularity = 'paragraph',
 ): SttAdapter {
-  const selected = selectSttProvider(env);
-  // The fake adapter emits a fixture's segments as written, one span each: the granularity of a
-  // keyless run is whatever its fixtures hold, so the setting has nothing to configure here.
-  if (selected.provider === 'fake') return new FakeSttAdapter({ fixtures: [] });
-  // The execution policy's provider-call timeout bounds every transcription request.
-  const timeoutMs = resolveAgentRequestTimeoutMs(env);
-  return new DeepgramSttAdapter({
-    apiKey: selected.apiKey,
-    ...(timeoutMs === undefined ? {} : { timeoutMs }),
-    ...(defaultModel ? { model: defaultModel } : {}),
-    // Passed only when the document asks for sentences: a document that does not declare the
-    // setting constructs the adapter with exactly the options it always got.
-    ...(spanGranularity === 'sentence' ? { spanGranularity } : {}),
-    resolver: new BlobRemuxSttMediaResolver(blob),
-  });
+  return selectSttAdapter(env, blob, defaultModel, spanGranularity).adapter;
 }
 
 /**
@@ -838,7 +966,16 @@ export function buildProductSttAdapter(
   blob: ReturnType<BlobStoreFactory>,
   spec: ProductSpec,
 ): SttAdapter {
-  return buildSttAdapter(
+  return selectProductSttAdapter(env, blob, spec).adapter;
+}
+
+/** `buildProductSttAdapter`, with what the boot banner reports about a fake adapter. */
+function selectProductSttAdapter(
+  env: NodeJS.ProcessEnv,
+  blob: ReturnType<BlobStoreFactory>,
+  spec: ProductSpec,
+): { adapter: SttAdapter; keyless: KeylessRunSettings } {
+  return selectSttAdapter(
     env,
     blob,
     providerDefaultModel(spec, 'deepgram'),
@@ -2647,16 +2784,48 @@ function productExtractionMode(
 const DETERMINISTIC_EXTRACTOR_CONFIG_KEYS = new Set(['agent_id', 'backend', 'schema_file']);
 
 /**
+ * Whether the operator lets the deterministic provider answer for an extraction config that names
+ * a real backend (`RAYSPEC_EXTRACTION_DETERMINISTIC_STAND_IN`): `true` | `false`, unset or blank ⇒
+ * `false`. Any other value refuses the boot.
+ */
+export function deterministicStandInEnabled(env: NodeJS.ProcessEnv): boolean {
+  const raw = settingOf(env, EXTRACTION_DETERMINISTIC_STAND_IN);
+  if (raw === undefined || raw === 'false') return false;
+  if (raw === 'true') return true;
+  throw new ProductBootError(
+    `${EXTRACTION_DETERMINISTIC_STAND_IN.name} '${raw}' is not supported (wired: true | false; ` +
+      'unset or blank ⇒ false). Fail-closed.',
+  );
+}
+
+/**
+ * Refuse the stand-in under a live run: there every extractor calls the backend its config names,
+ * so a boot that also asks the deterministic provider to answer for them contradicts itself.
+ */
+export function assertNoStandInUnderLive(env: NodeJS.ProcessEnv): void {
+  if (!deterministicStandInEnabled(env)) return;
+  throw new ProductBootError(
+    `${EXTRACTION_DETERMINISTIC_STAND_IN.name}=true needs ${EXTRACTION_MODE.name}=deterministic, ` +
+      "but the mode is 'live': a live run calls the backend each extraction config names. Unset " +
+      `it, or set ${EXTRACTION_MODE.name}=deterministic. Fail-closed.`,
+  );
+}
+
+/**
  * The shipped deterministic extraction provider, one handler per declared extractor, for
  * `RAYSPEC_EXTRACTION_MODE=deterministic` when no executor is injected. It is a development and test
  * provider, not for production extraction (see `@rayspec/agent-runtime`'s deterministic-extraction).
  *
- * It runs only for an extractor whose config selects it (`"backend": "deterministic"`): a config
- * that names a real backend is refused rather than answered by this provider, so it never stands in
- * for a provider the application chose. The config carries `agent_id`, `backend` and `schema_file`
- * (the output JSON Schema, config-dir-relative) and nothing else — a model or a prompt there would
- * describe a call that never happens. The managed posture refuses the provider: its capability
- * `extraction-deterministic` is test-only.
+ * It runs for an extractor whose config selects it (`"backend": "deterministic"`). That config
+ * carries `agent_id`, `backend` and `schema_file` (the output JSON Schema, config-dir-relative) and
+ * nothing else — a model or a prompt there would describe a call that never happens. A config that
+ * names a real backend is refused rather than answered by this provider, so it never stands in for
+ * a provider the application chose — unless the operator says, for this boot, that it may
+ * (`RAYSPEC_EXTRACTION_DETERMINISTIC_STAND_IN=true`). Then such a config is read for `agent_id` and
+ * `schema_file` alone: no backend is constructed, no credential is demanded, no prompt is read, and
+ * the committed file is used as it is. A stand-in also reads transcript spans and cites them, so a
+ * document whose extractor reads a transcript runs through grounding and persistence. The managed
+ * posture refuses the provider either way: its capability `extraction-deterministic` is test-only.
  */
 export function buildDeterministicExtraction(
   env: NodeJS.ProcessEnv,
@@ -2664,6 +2833,16 @@ export function buildDeterministicExtraction(
   spec: ProductSpec,
   hostingPosture: string | undefined,
 ): AgentRuntimeRegistry {
+  return deterministicExtraction(env, specPath, spec, hostingPosture).registry;
+}
+
+/** `buildDeterministicExtraction`, with the extractors it answers as a stand-in (for the banner). */
+export function deterministicExtraction(
+  env: NodeJS.ProcessEnv,
+  specPath: string,
+  spec: ProductSpec,
+  hostingPosture: string | undefined,
+): { registry: AgentRuntimeRegistry; standIns: ExtractionStandIn[] } {
   if (hostingPosture === 'managed') {
     throw new ProductBootError(
       'RAYSPEC_HOSTING_POSTURE=managed does not support the deterministic extraction provider ' +
@@ -2672,6 +2851,16 @@ export function buildDeterministicExtraction(
         'Use RAYSPEC_EXTRACTION_MODE=live with a supported backend. Fail-closed.',
     );
   }
+  const standInEnabled = deterministicStandInEnabled(env);
+  // The item properties that cite spans, as the document's artifact kinds declare them.
+  const evidenceFields = [
+    ...new Set(
+      spec.artifacts
+        .map((artifact) => artifact.provenance?.evidence_field)
+        .filter((field): field is string => typeof field === 'string'),
+    ),
+  ];
+  const standIns: ExtractionStandIn[] = [];
   const registry = new InMemoryAgentHandlerRegistry();
   for (const extractor of spec.extractors) {
     const configPath = resolveExtractorConfigPath(env, specPath, spec, extractor.id);
@@ -2696,7 +2885,8 @@ export function buildDeterministicExtraction(
           'extractor it configures. Fail-closed.',
       );
     }
-    if (cfg.backend !== DETERMINISTIC_EXTRACTION_BACKEND) {
+    const standIn = cfg.backend !== DETERMINISTIC_EXTRACTION_BACKEND;
+    if (standIn && !standInEnabled) {
       throw new ProductBootError(
         `extractor '${extractor.id}': RAYSPEC_EXTRACTION_MODE=deterministic, but its extraction ` +
           `config selects the backend '${String(cfg.backend)}' — the deterministic extraction ` +
@@ -2705,7 +2895,11 @@ export function buildDeterministicExtraction(
           'for a development or test run. Fail-closed.',
       );
     }
-    const unknown = Object.keys(cfg).filter((k) => !DETERMINISTIC_EXTRACTOR_CONFIG_KEYS.has(k));
+    // A config that selects the provider describes nothing else; a stand-in's other keys describe
+    // the real call, which is not made, and are left unread.
+    const unknown = standIn
+      ? []
+      : Object.keys(cfg).filter((k) => !DETERMINISTIC_EXTRACTOR_CONFIG_KEYS.has(k));
     if (unknown.length > 0) {
       throw new ProductBootError(
         `extractor '${extractor.id}': the extraction config at ${configPath} selects the ` +
@@ -2736,9 +2930,42 @@ export function buildDeterministicExtraction(
         `extractor '${extractor.id}': the output schema ${cfg.schema_file}: ${why}. Fail-closed.`,
       );
     }
-    registry.register(`agent.${extractor.id}`, deterministicExtractionHandler(schema));
+    if (standIn) {
+      standIns.push({ id: extractor.id, backend: String(cfg.backend) });
+      registry.register(
+        `agent.${extractor.id}`,
+        deterministicExtractionHandler(schema, { spanSets: { idFields: evidenceFields } }),
+      );
+    } else {
+      registry.register(`agent.${extractor.id}`, deterministicExtractionHandler(schema));
+    }
   }
-  return registry;
+  return { registry, standIns };
+}
+
+/**
+ * Refuse, under the managed posture, each setting of a run without provider keys. They configure
+ * the fake speech adapter and the deterministic extraction provider, whose capabilities are
+ * test-only, so a managed boot refuses them whatever the document declares and whatever provider is
+ * selected — a test setting left in a managed environment is refused even where it would be inert.
+ */
+export function assertManagedPostureKeyless(env: NodeJS.ProcessEnv): void {
+  for (const setting of FAKE_STT_SETTINGS) {
+    if (settingOf(env, setting) !== undefined) {
+      throw new ProductBootError(
+        `RAYSPEC_HOSTING_POSTURE=managed does not support ${setting.name}: it configures the ` +
+          "fake speech-to-text adapter, whose capability 'stt-fake' is test-only. Unset it. " +
+          'Fail-closed.',
+      );
+    }
+  }
+  if (settingOf(env, EXTRACTION_DETERMINISTIC_STAND_IN) === 'true') {
+    throw new ProductBootError(
+      `RAYSPEC_HOSTING_POSTURE=managed does not support ${EXTRACTION_DETERMINISTIC_STAND_IN.name}: ` +
+        'it selects the deterministic extraction provider, whose capability ' +
+        "'extraction-deterministic' is test-only. Unset it. Fail-closed.",
+    );
+  }
 }
 
 /**
@@ -2931,6 +3158,7 @@ async function buildProductYamlParts(db: Db, config: ServerConfig, opts: DeployP
       sttProvider: env.STT_PROVIDER?.trim(),
       ttsProvider: config.ttsProvider,
     });
+    assertManagedPostureKeyless(env);
   }
   const productBackends =
     config.hostingPosture === 'managed'
@@ -2944,15 +3172,22 @@ async function buildProductYamlParts(db: Db, config: ServerConfig, opts: DeployP
   const extractionMode = productExtractionMode(env, hasAgents);
   let liveAgent: ProductYamlRollout['liveAgent'] | undefined;
   let agents: AgentRuntimeRegistry | undefined;
+  let standIns: readonly ExtractionStandIn[] = [];
   if (extractionMode === 'live') {
+    assertNoStandInUnderLive(env);
     // `undefined` triggers the parameter default, so an omitting boot builds exactly as before.
     liveAgent = buildLiveAgent(env, specPath, spec, productBackends);
   } else if (extractionMode === 'deterministic') {
     // An injected executor (a test's or an embedder's) wins; without one the shipped deterministic
-    // provider runs, and only for extractors whose config selects it.
-    agents =
-      opts.deterministicAgents ??
-      buildDeterministicExtraction(env, specPath, spec, config.hostingPosture);
+    // provider runs: for extractors whose config selects it, and as a stand-in for the others only
+    // when the operator allows that for this boot.
+    if (opts.deterministicAgents) {
+      agents = opts.deterministicAgents;
+    } else {
+      const built = deterministicExtraction(env, specPath, spec, config.hostingPosture);
+      agents = built.registry;
+      standIns = built.standIns;
+    }
   }
 
   // ── 5. the STT adapter — DEMANDED iff the doc declares an stt.* step ───────────────────────────
@@ -2961,14 +3196,22 @@ async function buildProductYamlParts(db: Db, config: ServerConfig, opts: DeployP
   // capability's blob chunks, so an stt.* step needs the audio capability's blob factory — a doc that
   // declares stt without audio is a fail-closed misconfiguration (never a crash on an absent factory).
   let stt: SttAdapter | undefined;
+  let sttKeyless: KeylessRunSettings = {};
   if (usesStt) {
     assertSttSelectable(env, withAudio, opts.sttAdapter !== undefined);
     if (opts.sttAdapter) {
       stt = opts.sttAdapter;
     } else if (blobFactory) {
-      stt = buildProductSttAdapter(env, blobFactory(tenantId), spec);
+      const selected = selectProductSttAdapter(env, blobFactory(tenantId), spec);
+      stt = selected.adapter;
+      sttKeyless = selected.keyless;
     }
   }
+  // What the settings of a run without provider keys resolved to, for the boot banner.
+  const keyless: KeylessRunSettings = {
+    ...sttKeyless,
+    ...(standIns.length > 0 ? { standIns } : {}),
+  };
 
   // ── 5a. the conversation turn responder — built iff the doc declares conversation_input
   // (demands RAYSPEC_RESPONDER_MODE + the per-product conversation/<agent_id>.responder.json;
@@ -3008,6 +3251,7 @@ async function buildProductYamlParts(db: Db, config: ServerConfig, opts: DeployP
     liveAgent,
     agents,
     stt,
+    keyless,
     responder,
     normalizer,
   };
@@ -3134,6 +3378,7 @@ export async function deployProductYamlSpec(
     updateMigrations,
     blobFactory,
     extractionMode,
+    keyless,
   } = prepared;
 
   // ── 2. reboot-safety: mount-vs-materialize (existing data survives a reboot) ──────────
@@ -3208,6 +3453,7 @@ export async function deployProductYamlSpec(
     extractionMode ?? '',
     withConversationInput ? (env.RAYSPEC_RESPONDER_MODE?.trim() ?? '') : '',
     recordNormalizeDecl ? (env.RAYSPEC_NORMALIZE_MODE?.trim() ?? '') : '',
+    keyless,
   );
   if (banner) console.warn(banner);
 

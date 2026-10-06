@@ -12,7 +12,7 @@
  *    WITHOUT a database are pinned here; the two raised only by the Product-YAML boot —
  *    `RAYSPEC_PRODUCT_TENANT_ID` and `RAYSPEC_EXTRACTION_MODE` — are pinned in
  *    `product-boot-conditional-env.db.test.ts`, through a real boot, because that is the only place
- *    they can be provoked. Measured by replacing each `what` in turn with a marker: 16 of the 24
+ *    they can be provoked. Measured by replacing each `what` in turn with a marker: 16 of the 27
  *    records red one of the two files — 14 here, 2 there.
  *
  *    THE REMAINING EIGHT COMPOSE NO REFUSAL, and nothing pins them. `RAYSPEC_BLOB_ROOT`,
@@ -28,6 +28,13 @@
  *    only as an `optional` row or an `anyOf` sibling, and neither shape reads `what` — theirs is inert
  *    text. Wire any of the eight into a refusal and it needs a pin here too.
  *
+ *    THREE MORE LEND A REFUSAL THEIR NAME, NOT THEIR `what`. `RAYSPEC_STT_FAKE_FIXTURES`,
+ *    `RAYSPEC_STT_FAKE_FALLBACK` and `RAYSPEC_EXTRACTION_DETERMINISTIC_STAND_IN` are optional settings
+ *    of a run without provider keys: the product boot's refusals about them are composed from each
+ *    record's `name` and pinned as whole strings in `product-boot.unit.test.ts` and
+ *    `deterministic-extraction-boot.test.ts`; their `what` reaches only the report's `optional` rows,
+ *    which do not read it.
+ *
  * 2. The REPORT agrees with the boot. `checkBootEnv` is not allowed to answer a question the boot would
  *    answer differently, so the cases below drive the distinctions that were easiest to get wrong: the
  *    static profile requires NONE of the three secrets; an unset speech SELECTOR is never a demand
@@ -40,6 +47,7 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseProductSpec } from '@rayspec/spec';
 import { describe, expect, it } from 'vitest';
 import {
   AGENT_BACKEND_DEMANDS,
@@ -49,6 +57,7 @@ import {
   declaredAgentBackends,
   declaresPlaybackRoute,
   declaresStreamRoute,
+  declaresSttStep,
   fireableTriggers,
   isStaticProfile,
   PROVISION_BOOT_SECRETS,
@@ -506,6 +515,13 @@ describe('checkBootEnv — the product profile has its OWN demand set', () => {
   const ACME = join(repoRoot, 'examples/acme-notes/acme-notes.product.yaml');
   /** The shipped conversation product — the one that adds the responder mode. */
   const CHAT = join(repoRoot, 'examples/support-intake-chat/support-intake-chat.product.yaml');
+  /** The shipped document-intake product: extractors, no transcription. */
+  const INTAKE = join(repoRoot, 'examples/document-intake/document-intake.product.yaml');
+  const parsedProduct = (path: string) => {
+    const parsed = parseProductSpec(readFileSync(path, 'utf8'));
+    if (!parsed.ok) throw new Error(`${path} must parse`);
+    return parsed.value;
+  };
 
   it('adds the product tenant plus the capability-conditional demands acme-notes declares', async () => {
     const report = await checkBootEnv(ACME, readFileSync(ACME, 'utf8'), { ...OK3 });
@@ -527,6 +543,49 @@ describe('checkBootEnv — the product profile has its OWN demand set', () => {
       STT_PROVIDER: 'deepgram',
     });
     expect(missingOf(selected)).toContain('DEEPGRAM_API_KEY');
+  });
+
+  it('reports the settings of a run without provider keys as optional, where the boot reads them', async () => {
+    const KEYLESS = [
+      'RAYSPEC_STT_FAKE_FIXTURES',
+      'RAYSPEC_STT_FAKE_FALLBACK',
+      'RAYSPEC_EXTRACTION_DETERMINISTIC_STAND_IN',
+    ];
+    const keylessOf = (report: BootEnvReport) =>
+      report.optional.filter((o) => KEYLESS.includes(o.name)).map((o) => [o.name, o.set]);
+
+    // An audio + stt + extractor document: all three, unset.
+    const unset = await checkBootEnv(ACME, readFileSync(ACME, 'utf8'), { ...OK3 });
+    expect(keylessOf(unset)).toEqual(KEYLESS.map((name) => [name, false]));
+    // They are never demands: what is required and what is missing does not move with them.
+    const set = await checkBootEnv(ACME, readFileSync(ACME, 'utf8'), {
+      ...OK3,
+      RAYSPEC_STT_FAKE_FIXTURES: '/no/such/directory',
+      RAYSPEC_STT_FAKE_FALLBACK: 'not-a-supported-word',
+      RAYSPEC_EXTRACTION_DETERMINISTIC_STAND_IN: 'true',
+    });
+    expect(keylessOf(set)).toEqual(KEYLESS.map((name) => [name, true]));
+    expect(set.required).toEqual(unset.required);
+    expect(missingOf(set)).toEqual(missingOf(unset));
+    // Presence only: no value reaches the report.
+    expect(JSON.stringify(set)).not.toContain('/no/such/directory');
+    expect(JSON.stringify(set)).not.toContain('not-a-supported-word');
+
+    // A document that neither transcribes nor extracts reports none of them; one that declares an
+    // stt.* step without the audio capability is refused on its shape, so it reports no speech row.
+    for (const rel of [
+      '__fixtures__/non-audio-intake.product.yaml',
+      '__fixtures__/stt-no-audio.product.yaml',
+    ]) {
+      const path = join(here, rel);
+      expect(parsedProduct(path).extractors, rel).toHaveLength(0);
+      const report = await checkBootEnv(path, readFileSync(path, 'utf8'), { ...OK3 });
+      expect(keylessOf(report), rel).toEqual([]);
+    }
+    expect(declaresSttStep(parsedProduct(INTAKE))).toBe(false);
+    // An extractor document without a transcribing step reports the stand-in alone.
+    const intake = await checkBootEnv(INTAKE, readFileSync(INTAKE, 'utf8'), { ...OK3 });
+    expect(keylessOf(intake)).toEqual([['RAYSPEC_EXTRACTION_DETERMINISTIC_STAND_IN', false]]);
   });
 
   it('adds the responder mode for a conversation document', async () => {

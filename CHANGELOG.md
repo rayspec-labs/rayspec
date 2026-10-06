@@ -36,6 +36,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sentence carries `payload.span_granularity: sentence`, which a view can project; a
   paragraph-granular row is unchanged and carries no such key. See
   [`span_granularity` on `stt`](docs/spec-reference.md#span_granularity-on-stt).
+- **A deployed product runs end to end with no provider key.** A product that transcribes could
+  validate, plan, dry-run and pack without a key, but a real deployment of it could not get a
+  recording past transcription: `STT_PROVIDER=fake` built the fake adapter with no fixtures, and
+  the deterministic extraction provider refused the product's committed extraction config because
+  it names a real backend. Three environment variables close that, for development and tests:
+  - `RAYSPEC_STT_FAKE_FIXTURES` names a directory of transcript fixture files (`*.json`) the fake
+    adapter answers recordings from. A fixture for the recording's own session answers first, then
+    a fixture whose `session_id` is `*` (any session). The directory is read once, at boot; a
+    directory that cannot be read, holds no fixture, holds a malformed one or holds two for the
+    same session and track refuses the boot instead of failing the first recording. A recording's
+    session and track ids are only compared with the ids the fixtures declare: no path is built
+    from them, and symbolic links in the directory are not followed.
+  - `RAYSPEC_STT_FAKE_FALLBACK=fixed` answers a recording no fixture matches with a fixed
+    two-sentence transcript, with or without a fixture directory. It carries no labelled line, so
+    it takes a recording to a readable transcript, not to extracted artifacts.
+  - `RAYSPEC_EXTRACTION_DETERMINISTIC_STAND_IN=true` lets the deterministic extraction provider,
+    under `RAYSPEC_EXTRACTION_MODE=deterministic`, answer for an extractor whose config names a
+    real backend. The committed config is read for `agent_id` and `schema_file` only and is not
+    modified; no backend is constructed, no credential is asked for and no prompt is read. A
+    stand-in also reads transcript spans and gives each claim the id of the span its labelled
+    line was read from, so the claim passes grounding and is persisted with a true citation.
+  With the fixture `examples/acme-notes/stt-fixtures/default.json`, the acme-notes example now
+  runs upload, transcribe, extract, ground, persist and read through `rayspec deploy` with none
+  of its files changed; [getting started](docs/getting-started.md) walks through it.
+  **All three stay a development and test posture.** The non-real-provider boot banner names each
+  one in effect: how many fixture files answer, whether the fallback is on, and every extractor
+  the deterministic provider stands in for with the backend its config names.
+  `RAYSPEC_HOSTING_POSTURE=managed` refuses each of them at boot, by name, whatever the document
+  declares. A fake-adapter setting beside another `STT_PROVIDER`, an unsupported value, and the
+  stand-in under `RAYSPEC_EXTRACTION_MODE=live` refuse the boot too. `rayspec deploy --check-env`
+  lists the three as optional for a product document that reads them. **Nothing changes for a
+  deployment that sets none of them:** the fake adapter has no fixtures and gives the same error,
+  a real-backend config under deterministic mode is refused with the same message, an extractor
+  whose own config selects `deterministic` reads what it read before, and the banner text is the
+  same. A bundle packed from a config that names a real backend still declares that backend's key
+  as a required binding, so a keyless deploy of the bundle supplies a placeholder value for it.
+  The fixture directory is deployment configuration and is not carried in a bundle. See
+  [fixtures for the fake speech-to-text adapter](docs/spec-reference.md#fixtures-for-the-fake-speech-to-text-adapter)
+  and [standing in for a configured backend](docs/spec-reference.md#standing-in-for-a-configured-backend).
 
 ### Fixed
 

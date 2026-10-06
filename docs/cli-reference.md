@@ -1349,6 +1349,17 @@ change is applied by the explicit `--apply-migration` flag below.
   platform secrets, and a product document gets `RAYSPEC_PRODUCT_TENANT_ID` plus the
   capability-conditional demands its own declarations raise.
 
+  A product document also lists, under `optional`, the settings of a run without
+  provider keys, each where the boot reads it: `RAYSPEC_STT_FAKE_FIXTURES` and
+  `RAYSPEC_STT_FAKE_FALLBACK` when the document declares an `stt.*` step alongside the
+  audio capability, and `RAYSPEC_EXTRACTION_DETERMINISTIC_STAND_IN` when it declares
+  extractors. They are never demands, so `required` and `missing` do not move with them,
+  and they are reported by presence alone: a fixture directory that is not one, an
+  unsupported value, a fake-adapter setting beside `STT_PROVIDER=deepgram` or the
+  stand-in under `RAYSPEC_EXTRACTION_MODE=live` still refuses the boot. See
+  [fixtures for the fake speech-to-text adapter](./spec-reference.md#fixtures-for-the-fake-speech-to-text-adapter)
+  and [standing in for a configured backend](./spec-reference.md#standing-in-for-a-configured-backend).
+
   The demands are not re-derived by the CLI: they come from the same records
   `@rayspec/server` composes its boot refusals from, so a demand the boot raises is a
   demand this prints.
@@ -1512,7 +1523,12 @@ inspect, bind, review, apply, readiness, update, recovery — is
   environment (a provider key also from its `<NAME>_FILE`). No value is put into the process
   environment: provider keys go to the adapters that use them, the application's own names to its
   handlers as `init.bindings`. Values never appear in output, logs, plans or receipts; plans carry
-  revision ids.
+  revision ids. A bundle whose extraction config names a model backend declares that backend's
+  key as a required binding, and the plan blocks without it (`RAY_BINDING_MISSING`). That holds
+  for a run without provider keys too
+  (`RAYSPEC_EXTRACTION_DETERMINISTIC_STAND_IN=true`, see
+  [standing in for a configured backend](./spec-reference.md#standing-in-for-a-configured-backend)):
+  give the binding any placeholder value there, since nothing reads it.
 - **`--dry-run`** — plan only: the bundle is read and verified by the one bundle reader (nothing is
   extracted or run), then planned against the live database. Prints the plan — required bindings,
   schema impact, permission changes, storage, blockers, warnings — with `planDigest`, `preparedAt`
