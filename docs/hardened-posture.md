@@ -25,6 +25,15 @@ residual risk this release accepts are in the [Threat model](./threat-model.md).
 `RAYSPEC_SINGLE_TENANT` accepts exactly `true` or `false`; any other value refuses the boot, so a
 typo never leaves the limit off by accident.
 
+`RAYSPEC_TRUSTED_PROXIES` is a comma-separated list of addresses and CIDR ranges. A peer on a
+dual-stack socket reports an IPv4 client as an IPv4-mapped IPv6 address; such an address is the
+IPv4 address it carries, in every spelling (`::ffff:10.1.2.3`, `::ffff:a01:203`, the fully expanded
+form), and is matched against the IPv4 entries of the list. An entry written inside the mapped
+block is the IPv4 range it carries (`::ffff:10.0.0.0/104` is `10.0.0.0/8`, `::ffff:0:0/96` is every
+IPv4 address). An IPv6 entry wider than that block (`::/8`, `::/0`) covers IPv6 peers only, so an
+IPv4 proxy is trusted only by an entry that names it. An entry whose prefix length is missing or
+malformed (`10.0.0.0/`, `10.0.0.0/33`) matches nothing.
+
 ## Turning it on
 
 1. **Create the database roles** and point the runtime at them, as

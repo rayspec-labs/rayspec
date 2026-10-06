@@ -272,6 +272,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   test tooling (`vitest`, `vite`, `postcss`) and is not part of what a consumer installs. A
   fresh consumer install of the published packages already resolves `proxy-addr` `2.0.8`, because
   `express` declares `^2.0.7`; the consumer scan reports nothing new.
+- **A trusted-proxy range gives one answer for one address, however the address is spelled.** An
+  IPv4-mapped IPv6 address was replaced by its IPv4 address only in the dotted spelling
+  (`::ffff:10.1.2.3`). The hex spelling of the same address (`::ffff:a01:203`, also in uppercase,
+  with leading zeros or fully expanded) stayed IPv6: it was compared against the IPv6 entries of
+  `RAYSPEC_TRUSTED_PROXIES`, so a broad entry such as `::/8` made an IPv4 peer a trusted proxy
+  whose `X-Forwarded-For` was believed, and the IPv4 entries did not apply to it. The mapped block
+  `::ffff:0:0/96` is now recognised by value: every spelling becomes the IPv4 address it carries
+  before anything is matched, on the peer, on each `X-Forwarded-For` hop and on `X-Real-IP`. On the
+  list side, an entry written inside the mapped block is the IPv4 range it carries
+  (`::ffff:10.0.0.0/104` is `10.0.0.0/8`, `::ffff:0:0/96` is every IPv4 address), and an IPv6 entry
+  wider than the block (`::/8`, `::/0`) covers IPv6 peers only, as it always did for the dotted
+  spelling. A Node socket reports a mapped peer in the dotted spelling, so the peer check of a
+  running deployment was already the IPv4 one; the hex spelling reaches the runtime in a
+  forwarding header. **What changes:** the client address the runtime derives is the IPv4 address
+  for every spelling, so the rate-limit bucket, the address stored with a session and the address
+  hash in the audit log are the same for `::ffff:a01:203` as for `10.1.2.3`, where the hex spelling
+  had its own before. An entry inside the mapped block matched no dotted peer before and matches
+  its IPv4 range now; review a list that carries one, `::ffff:0:0/96` in particular. An entry with
+  a missing or malformed prefix length (`10.0.0.0/`, `10.0.0.0/8.0`) matches nothing; an empty
+  prefix was read as `/0` and trusted every address of the family. An IPv6 address with a dotted
+  tail outside the mapped block (`64:ff9b::10.1.2.3`) is parsed and matches IPv6 entries, where it
+  matched none. No other IPv6 address is rewritten.
 
 ## [1.9.0] - 2026-10-05
 

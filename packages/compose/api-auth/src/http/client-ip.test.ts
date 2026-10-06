@@ -15,6 +15,41 @@ describe('normalizeIp', () => {
     expect(normalizeIp('::ffff:1.2.3.4')).toBe('1.2.3.4');
     expect(normalizeIp('::FFFF:1.2.3.4')).toBe('1.2.3.4');
   });
+  it('unwraps every spelling of one IPv4-mapped address to the same IPv4 address', () => {
+    for (const spelling of [
+      '::ffff:10.1.2.3',
+      '::ffff:a01:203',
+      '::FFFF:A01:203',
+      '::ffff:0a01:0203',
+      '0:0:0:0:0:ffff:a01:203',
+      '0000:0000:0000:0000:0000:ffff:0a01:0203',
+      '0000:0000:0000:0000:0000:FFFF:10.1.2.3',
+      '0::ffff:a01:203',
+      '[::ffff:a01:203]',
+      '[::ffff:a01:203]:443',
+      '::ffff:a01:203%eth0',
+    ]) {
+      expect(normalizeIp(spelling), spelling).toBe('10.1.2.3');
+    }
+    expect(normalizeIp('::ffff:0:0')).toBe('0.0.0.0');
+    expect(normalizeIp('::ffff:ffff:ffff')).toBe('255.255.255.255');
+  });
+  it('unwraps the mapped block only — its neighbours and look-alikes stay IPv6', () => {
+    // IPv4-compatible (`::/96`), NAT64, and the blocks on either side of `::ffff:0:0/96`.
+    expect(normalizeIp('::a01:203')).toBe('::a01:203');
+    expect(normalizeIp('::10.1.2.3')).toBe('::10.1.2.3');
+    expect(normalizeIp('64:ff9b::10.1.2.3')).toBe('64:ff9b::10.1.2.3');
+    expect(normalizeIp('::fffe:a01:203')).toBe('::fffe:a01:203');
+    expect(normalizeIp('::1:0:a01:203')).toBe('::1:0:a01:203');
+    expect(normalizeIp('::ffff:0:a01:203')).toBe('::ffff:0:a01:203');
+    expect(normalizeIp('1::ffff:a01:203')).toBe('1::ffff:a01:203');
+  });
+  it('leaves text that is not an address as written, never as a half-unwrapped address', () => {
+    expect(normalizeIp('::ffff:999.1.2.3')).toBe('::ffff:999.1.2.3');
+    expect(normalizeIp('::ffff:1.2.3')).toBe('::ffff:1.2.3');
+    expect(normalizeIp('::ffff:g01:203')).toBe('::ffff:g01:203');
+    expect(normalizeIp('::ffff:a01:203:1:2:3:4:5')).toBe('::ffff:a01:203:1:2:3:4:5');
+  });
   it('strips brackets and a trailing port', () => {
     expect(normalizeIp('[::1]')).toBe('::1');
     expect(normalizeIp('[2001:db8::1]:443')).toBe('2001:db8::1');
@@ -53,6 +88,91 @@ describe('ipInCidr', () => {
   it('does not cross address families', () => {
     expect(ipInCidr('1.2.3.4', '::/0')).toBe(false);
     expect(ipInCidr('::1', '0.0.0.0/0')).toBe(false);
+  });
+
+  /** One address, `10.1.2.3`, in the spellings a peer or a forwarding header can carry. */
+  const MAPPED_SPELLINGS = [
+    '10.1.2.3',
+    '::ffff:10.1.2.3',
+    '::ffff:a01:203',
+    '::FFFF:0A01:0203',
+    '0:0:0:0:0:ffff:a01:203',
+    '0000:0000:0000:0000:0000:ffff:0a01:0203',
+  ];
+
+  it('an IPv4-mapped address matches IPv4 ranges in every spelling', () => {
+    for (const spelling of MAPPED_SPELLINGS) {
+      expect(ipInCidr(spelling, '10.0.0.0/8'), spelling).toBe(true);
+      expect(ipInCidr(spelling, '10.1.2.3'), spelling).toBe(true);
+      expect(ipInCidr(spelling, '192.168.0.0/16'), spelling).toBe(false);
+    }
+  });
+
+  it('a broad IPv6 range does not reach an IPv4-mapped address, in any spelling', () => {
+    for (const range of ['::/8', '::/0', '::/80', '::/95', '::ffff:0:0/95', '::fffe:0:0/95']) {
+      for (const spelling of MAPPED_SPELLINGS) {
+        expect(ipInCidr(spelling, range), `${spelling} in ${range}`).toBe(false);
+      }
+    }
+    // The control: those ranges still match the IPv6 addresses they name.
+    expect(ipInCidr('::1', '::/8')).toBe(true);
+    expect(ipInCidr('::a01:203', '::/8')).toBe(true);
+    expect(ipInCidr('::fffe:a01:203', '::ffff:0:0/95')).toBe(true);
+    expect(ipInCidr('2001:db8::1', '::/0')).toBe(true);
+  });
+
+  it('a range written inside the mapped block is the IPv4 range it carries', () => {
+    for (const spelling of MAPPED_SPELLINGS) {
+      // `::ffff:0:0/96` is all of IPv4; the narrower ones are 10.0.0.0/8 and the single address.
+      for (const range of [
+        '::ffff:0:0/96',
+        '::FFFF:0:0/96',
+        '0:0:0:0:0:ffff:0:0/96',
+        '::ffff:0.0.0.0/96',
+        '::ffff:10.0.0.0/104',
+        '::ffff:a00:0/104',
+        '::ffff:a01:203/128',
+        '::ffff:a01:203',
+        '[::ffff:a01:203]',
+      ]) {
+        expect(ipInCidr(spelling, range), `${spelling} in ${range}`).toBe(true);
+      }
+      for (const range of ['::ffff:b00:0/104', '::ffff:a01:204', '::ffff:11.0.0.0/104']) {
+        expect(ipInCidr(spelling, range), `${spelling} in ${range}`).toBe(false);
+      }
+    }
+    // The mapped block is IPv4 and nothing else: an IPv6 address is not in it.
+    expect(ipInCidr('::1', '::ffff:0:0/96')).toBe(false);
+    expect(ipInCidr('2001:db8::1', '::ffff:0:0/96')).toBe(false);
+  });
+
+  it('matches an IPv6 address against an IPv6 range whatever the spelling of either', () => {
+    expect(ipInCidr('2001:0DB8:0000:0000:0000:0000:0000:0001', '2001:db8::/32')).toBe(true);
+    expect(ipInCidr('2001:db8::1', '2001:0DB8:0:0:0:0:0:0/32')).toBe(true);
+    expect(ipInCidr('64:ff9b::10.1.2.3', '64:ff9b::/96')).toBe(true);
+    expect(ipInCidr('64:ff9b::a01:203', '64:ff9b::10.0.0.0/104')).toBe(true);
+  });
+
+  it('a malformed prefix length matches nothing', () => {
+    for (const range of [
+      '10.0.0.0/',
+      '10.0.0.0/33',
+      '10.0.0.0/-1',
+      '10.0.0.0/8.0',
+      '10.0.0.0/0x8',
+      '10.0.0.0/1e1',
+      '10.0.0.0/eight',
+      '::ffff:0:0/',
+      '::ffff:0:0/129',
+      '::ffff:10.0.0.0/1e2',
+    ]) {
+      expect(ipInCidr('10.1.2.3', range), range).toBe(false);
+    }
+    expect(ipInCidr('::1', '::/')).toBe(false);
+    expect(ipInCidr('::1', '::/129')).toBe(false);
+    // The control: a zero prefix that is written out still matches its whole family.
+    expect(ipInCidr('10.1.2.3', '0.0.0.0/0')).toBe(true);
+    expect(ipInCidr('::1', '::/0')).toBe(true);
   });
 });
 
@@ -142,6 +262,59 @@ describe('resolveClientIp', () => {
         trustedProxies: TRUSTED,
       }),
     ).toBe('9.9.9.9');
+  });
+
+  it('a mapped peer gets one answer from the trusted list, however its address is spelled', () => {
+    const spellings = [
+      '::ffff:10.1.2.3',
+      '::ffff:a01:203',
+      '::FFFF:0A01:0203',
+      '0:0:0:0:0:ffff:a01:203',
+    ];
+    for (const peer of spellings) {
+      // A broad IPv6 range does not make an IPv4 peer a trusted proxy: the header is ignored.
+      expect(
+        resolveClientIp({ peer, forwardedFor: '8.8.8.8', realIp: null, trustedProxies: ['::/8'] }),
+        peer,
+      ).toBe('10.1.2.3');
+      // The IPv4 range that names the peer does, and so does the mapped spelling of that range.
+      for (const range of ['10.0.0.0/8', '::ffff:10.0.0.0/104', '::ffff:0:0/96']) {
+        expect(
+          resolveClientIp({ peer, forwardedFor: '8.8.8.8', realIp: null, trustedProxies: [range] }),
+          `${peer} behind ${range}`,
+        ).toBe('8.8.8.8');
+      }
+    }
+  });
+
+  it('forwarded addresses are unwrapped the same way: one client, one identity', () => {
+    const identities = ['9.9.9.9', '::ffff:9.9.9.9', '::ffff:909:909', '::FFFF:0909:0909'].map(
+      (client) =>
+        resolveClientIp({
+          peer: '10.0.0.1',
+          forwardedFor: client,
+          realIp: null,
+          trustedProxies: TRUSTED,
+        }),
+    );
+    expect(new Set(identities)).toEqual(new Set(['9.9.9.9']));
+    expect(
+      resolveClientIp({
+        peer: '10.0.0.1',
+        forwardedFor: null,
+        realIp: '::ffff:909:909',
+        trustedProxies: TRUSTED,
+      }),
+    ).toBe('9.9.9.9');
+    // A trusted hop written in the hex spelling is skipped like its dotted twin.
+    expect(
+      resolveClientIp({
+        peer: '10.0.0.1',
+        forwardedFor: '2.2.2.2, ::ffff:a00:2',
+        realIp: null,
+        trustedProxies: TRUSTED,
+      }),
+    ).toBe('2.2.2.2');
   });
 
   it('no peer at all → "unknown" (never trusts a forwarding header without a peer)', () => {
