@@ -30,7 +30,7 @@
       },
       {
         "name": "rayspec:lockfile-sha256",
-        "value": "e562e1e88f084024bf17a98f7de0c82fdf3fad6c9c0be9bdf8f846b14173d03f"
+        "value": "a9ea9501ae61af33f5785af4d0a4b50e694e4e9bf69e5efc6c9993fdc790f16c"
       },
       {
         "name": "rayspec:license-inventory",
@@ -38,7 +38,7 @@
       },
       {
         "name": "rayspec:license-inventory-sha256",
-        "value": "452cba1ad274e83938de3c3fa206efff1b746ffb3262bad22fa9d67ef8e321c8"
+        "value": "53f17c77218fdab9c6318fc7ac13ccbaa4eb134c42eda5b260794b9a34c18b53"
       },
       {
         "name": "rayspec:scope",
@@ -1426,11 +1426,11 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40modelcontextprotocol/sdk@1.29.0",
+      "bom-ref": "pkg:npm/%40modelcontextprotocol/sdk@1.31.0",
       "name": "@modelcontextprotocol/sdk",
-      "version": "1.29.0",
+      "version": "1.31.0",
       "scope": "required",
-      "purl": "pkg:npm/%40modelcontextprotocol/sdk@1.29.0",
+      "purl": "pkg:npm/%40modelcontextprotocol/sdk@1.31.0",
       "licenses": [
         {
           "expression": "MIT"
@@ -1439,7 +1439,7 @@
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "ce8dfb99903d8495a950b824469a307b07b3d72e8c2f91ac5c93d8f05234b4104277bec712fcdae230ea44a397807367f3aecf5460b24ddceaa73d22ceee598d"
+          "content": "52f4cc8273659c804eff6da86f645c5460e572f3ac950b3c4f9f7e15319d0342f6edadfd7dd185fc40c44cdb4354ae03646a70a2696c62945d03c5177152ffa7"
         }
       ]
     },
@@ -6804,7 +6804,7 @@
         "pkg:npm/%40anthropic-ai/claude-agent-sdk-win32-arm64@0.3.185",
         "pkg:npm/%40anthropic-ai/claude-agent-sdk-win32-x64@0.3.185",
         "pkg:npm/%40anthropic-ai/sdk@0.105.0",
-        "pkg:npm/%40modelcontextprotocol/sdk@1.29.0",
+        "pkg:npm/%40modelcontextprotocol/sdk@1.31.0",
         "pkg:npm/zod@4.4.3"
       ]
     },
@@ -7167,7 +7167,7 @@
     {
       "ref": "pkg:npm/%40google/genai@1.52.0",
       "dependsOn": [
-        "pkg:npm/%40modelcontextprotocol/sdk@1.29.0",
+        "pkg:npm/%40modelcontextprotocol/sdk@1.31.0",
         "pkg:npm/google-auth-library@10.7.0",
         "pkg:npm/p-retry@4.6.2",
         "pkg:npm/protobufjs@7.6.5",
@@ -7276,7 +7276,7 @@
       ]
     },
     {
-      "ref": "pkg:npm/%40modelcontextprotocol/sdk@1.29.0",
+      "ref": "pkg:npm/%40modelcontextprotocol/sdk@1.31.0",
       "dependsOn": [
         "pkg:npm/%40hono/node-server@1.19.15",
         "pkg:npm/ajv-formats@3.0.1",
@@ -7328,7 +7328,7 @@
     {
       "ref": "pkg:npm/%40openai/agents-core@0.11.8",
       "dependsOn": [
-        "pkg:npm/%40modelcontextprotocol/sdk@1.29.0",
+        "pkg:npm/%40modelcontextprotocol/sdk@1.31.0",
         "pkg:npm/debug@4.4.3",
         "pkg:npm/openai@6.44.0",
         "pkg:npm/zod@4.4.3"
@@ -7463,7 +7463,7 @@
     {
       "ref": "pkg:npm/%40rayspec/adapter-codex@1.9.0",
       "dependsOn": [
-        "pkg:npm/%40modelcontextprotocol/sdk@1.29.0",
+        "pkg:npm/%40modelcontextprotocol/sdk@1.31.0",
         "pkg:npm/%40openai/codex-sdk@0.142.2",
         "pkg:npm/%40rayspec/core@1.9.0",
         "pkg:npm/zod@4.4.3"
