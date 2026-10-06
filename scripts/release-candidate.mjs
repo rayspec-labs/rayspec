@@ -22,7 +22,8 @@
  *      `image/lock/package-lock.json` (the Dockerfile's `lock` stage), then the image installs
  *      exactly that tree with `npm ci`, its timestamps set to the commit's time; the run checks that
  *      the image holds that lockfile and writes the CycloneDX SBOM of the image's installed tree
- *      (`scripts/gen-image-sbom.mjs`, `image/image-sbom.cdx.json`);
+ *      and Debian packages (`scripts/gen-image-sbom.mjs`, `image/image-sbom.cdx.json`), which
+ *      refuses an image without ffmpeg;
  *   5. writes the release manifest (`scripts/release-manifest.mjs generate`) and, with
  *      `--key-file`, signs and verifies it;
  *   6. writes `candidate.json`: the version, the commit, every artifact with its SHA-256 and the
@@ -41,9 +42,9 @@
  *
  * The conformance of the candidate — the consumer install, the reference journeys and the contract
  * corpus against that install and against the image, the upgrade matrix — runs on these artifacts
- * afterwards (docs/releasing.md). Needs `pnpm build`, git, tar and, for the image, docker buildx
- * and the registry. Exit 0 built, 1 a step failed (named in candidate.json and on stderr), 2 usage
- * or a refused precondition.
+ * afterwards (docs/releasing.md). Needs `pnpm build`, git, tar and, for the image, docker buildx,
+ * the registry and snapshot.debian.org (ffmpeg). Exit 0 built, 1 a step failed (named in
+ * candidate.json and on stderr), 2 usage or a refused precondition.
  */
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';

@@ -20,15 +20,36 @@
  * escapes the served directory — so this module adds an explicit fail-closed guard IN FRONT of it:
  *
  *   (a) DOTFILES / HIDDEN — any path segment that begins with `.` (covers `.env`, `.git`, and the
- *       `.`/`..` traversal segments) is refused.
+ *       `.`/`..` traversal segments) is refused. ONE exception, on a `route: '/'` mount only: the
+ *       top-level `.well-known` directory (see WELL-KNOWN below).
  *   (b) TRAVERSAL — the resolved candidate path must stay inside the served directory after
  *       `path.resolve` (covers `..` and URL-encoded `..%2f`); a candidate that climbs out is refused.
  *   (c) SYMLINK-ESCAPE — if the target exists, its `fs.realpathSync` must stay inside the served
- *       directory's real path; a symlink pointing outside is refused.
+ *       directory's real path; a symlink pointing outside is refused. The check is CONTAINMENT ONLY:
+ *       a link that ends inside the directory is followed whatever its target is called, so
+ *       `alias.txt -> .env` serves the bytes of `.env` under the name `alias.txt`. Rule (a) is about
+ *       the REQUEST path; a link is the site naming one of its own files a second time.
  *
  * A refused request passes through to `next()` → the platform's uniform 404 (never the SPA shell, even
  * for an `spa:true` mount — a traversal/dotfile attempt must not be answered with `index.html`). A
  * directory is never listed. This module is import-safe (no side effects at module load).
+ *
+ * WELL-KNOWN — RFC 8615 reserves `/.well-known/` at the root of an origin for site metadata that
+ * clients fetch by a fixed path: `security.txt` (RFC 9116), `assetlinks.json`,
+ * `apple-app-site-association`, `change-password`. Under rule (a) alone every one of them answered 404
+ * although the file was in the served directory. So a `route: '/'` mount serves that ONE directory:
+ * the request's FIRST segment must be exactly `.well-known` (case-sensitive), and no segment below it
+ * may begin with `.` — `/.well-known/.secret`, `/a/.well-known/x` and every other dot path stay
+ * refused. A mount at any other route keeps rule (a) without the exception: a well-known URI has no
+ * meaning below the origin root, so there is nothing to serve there. Checks (b) and (c) apply to these
+ * paths unchanged — (c) with its containment-only reading, so a link inside `.well-known` that ends
+ * at a hidden file of the mount serves it, as a link anywhere else in the mount does — and so do
+ * the range guard, the method guard, `cleanUrls` and the root `404.html`.
+ * ONE thing differs: a miss under `/.well-known/` never reaches the SPA fallback. The clients of these
+ * paths read a 200 as "the document exists", so answering a missing `security.txt` with the SPA shell
+ * would hand them an HTML page as the policy; the miss ends at the root `404.html` (status 404) or the
+ * uniform 404, as it does on an `spa: false` mount. `apple-app-site-association` carries no extension
+ * to derive a type from and is JSON by definition, so it is served as `application/json`.
  *
  * CLEAN URLS — `cleanUrls: true` (opt-in, default false) resolves an extensionless request the way
  * Netlify / Vercel / GitHub Pages do, so a site whose navigation links `/docs/getting-started` while
@@ -171,16 +192,45 @@ function isReservedRoutePath(path: string): boolean {
   return RESERVED_ROUTE_PREFIXES.some((p) => path === p || path.startsWith(`${p}/`));
 }
 
+/** The one dot directory a root mount serves: RFC 8615's well-known URI prefix. */
+const WELL_KNOWN_SEGMENT = '.well-known';
+
+/** The non-empty segments of a mount-relative path. */
+function pathSegments(subPath: string): string[] {
+  return subPath.split('/').filter((s) => s.length > 0);
+}
+
+/**
+ * Is `subPath` under the mount's top-level `.well-known` directory (or that directory itself)? Only
+ * the FIRST segment is compared, and exactly: `.Well-Known` and `/a/.well-known` are not it.
+ */
+function isWellKnownPath(subPath: string): boolean {
+  return pathSegments(subPath)[0] === WELL_KNOWN_SEGMENT;
+}
+
 /**
  * Is `subPath` (the request path with the mount `route` prefix stripped, decoded) SAFE to serve from
  * `baseDir`? Fail-closed on dotfiles, traversal, and symlink-escape (see the module header). `realBaseDir`
  * is `baseDir`'s pre-resolved real path (computed once at mount time) so the symlink check needs no
- * per-request `realpathSync(baseDir)`.
+ * per-request `realpathSync(baseDir)`. `allowWellKnown` is true for a `route: '/'` mount only and lifts
+ * rule (a) for the first segment `.well-known`, and for nothing else.
  */
-function isSafeStaticPath(baseDir: string, realBaseDir: string, subPath: string): boolean {
-  // (a) DOTFILES / HIDDEN — reject any segment starting with `.` (covers `.env`, `.`/`..` traversal).
-  const segments = subPath.split('/').filter((s) => s.length > 0);
-  if (segments.some((s) => s.startsWith('.'))) return false;
+function isSafeStaticPath(
+  baseDir: string,
+  realBaseDir: string,
+  subPath: string,
+  allowWellKnown: boolean,
+): boolean {
+  // (a) DOTFILES / HIDDEN — reject any segment starting with `.` (covers `.env`, `.`/`..` traversal),
+  // except a root mount's leading `.well-known`. A dot segment BELOW it is refused like any other.
+  const segments = pathSegments(subPath);
+  if (
+    segments.some(
+      (s, i) => s.startsWith('.') && !(allowWellKnown && i === 0 && s === WELL_KNOWN_SEGMENT),
+    )
+  ) {
+    return false;
+  }
 
   // (b) TRAVERSAL — resolve the candidate RELATIVE to baseDir (the leading `.` neutralizes an absolute
   // sub-path) and require it to stay inside baseDir. Covers `..` and its URL-encoded forms.
@@ -201,6 +251,9 @@ function isSafeStaticPath(baseDir: string, realBaseDir: string, subPath: string)
   }
   return true;
 }
+
+/** The well-known file without an extension that is JSON by definition (Apple's app-site association). */
+const APPLE_APP_SITE_ASSOCIATION_PATH = `/${WELL_KNOWN_SEGMENT}/apple-app-site-association`;
 
 /** `statSync` that returns `undefined` instead of throwing on a missing/unreadable path. */
 function statSyncSafe(path: string): Stats | undefined {
@@ -242,12 +295,13 @@ function resolveCleanUrlTarget(
   baseDir: string,
   realBaseDir: string,
   subPath: string,
+  allowWellKnown: boolean,
 ): { path: string; size: number } | undefined {
   if (subPath === '' || subPath.endsWith('/')) return undefined;
   if (lastSegmentHasExtension(subPath)) return undefined;
   if (statSyncSafe(join(baseDir, subPath))?.isFile() === true) return undefined;
   const htmlSubPath = `${subPath}.html`;
-  if (!isSafeStaticPath(baseDir, realBaseDir, htmlSubPath)) return undefined;
+  if (!isSafeStaticPath(baseDir, realBaseDir, htmlSubPath, allowWellKnown)) return undefined;
   const htmlFile = join(baseDir, htmlSubPath);
   const htmlStat = statSyncSafe(htmlFile);
   return htmlStat?.isFile() ? { path: htmlFile, size: htmlStat.size } : undefined;
@@ -267,6 +321,7 @@ function resolveStaticTarget(
   realBaseDir: string,
   subPath: string,
   cleanUrls: boolean,
+  allowWellKnown: boolean,
 ): { path: string; size: number } | undefined {
   const candidate = join(baseDir, subPath);
   const stat = statSyncSafe(candidate);
@@ -274,7 +329,7 @@ function resolveStaticTarget(
   // CLEAN URLS: `<subPath>.html` is tried BEFORE the directory's `index.html` — the order the hosts
   // this option mirrors use, and the order the mount serves in.
   if (cleanUrls) {
-    const cleanTarget = resolveCleanUrlTarget(baseDir, realBaseDir, subPath);
+    const cleanTarget = resolveCleanUrlTarget(baseDir, realBaseDir, subPath, allowWellKnown);
     if (cleanTarget !== undefined) return cleanTarget;
   }
   if (stat?.isDirectory()) {
@@ -319,9 +374,10 @@ function unsatisfiableRangeResponse(
   subPath: string,
   spa: boolean,
   cleanUrls: boolean,
+  allowWellKnown: boolean,
   rangeHeader: string,
 ): Response | undefined {
-  const target = resolveStaticTarget(baseDir, realBaseDir, subPath, cleanUrls);
+  const target = resolveStaticTarget(baseDir, realBaseDir, subPath, cleanUrls, allowWellKnown);
   if (target !== undefined) return unsatisfiableRangeForSize(target.size, rangeHeader);
   // Direct target missed. For an spa:true mount the request falls through to `index.html` — guard the
   // range against the file the SPA fallback will actually serve so the buggy math never runs on it.
@@ -369,7 +425,7 @@ function serveNotFoundPage(
 ): Response | undefined {
   // Only the EXACT root FILE `404.html` (never a directory named 404.html); same fail-closed hardening
   // as the rest of the module, so a `404.html` symlink escaping the served directory is refused.
-  if (!isSafeStaticPath(baseDir, realBaseDir, '/404.html')) return undefined;
+  if (!isSafeStaticPath(baseDir, realBaseDir, '/404.html', false)) return undefined;
   const file = join(baseDir, '404.html');
   const stat = statSyncSafe(file);
   if (stat === undefined || !stat.isFile()) return undefined;
@@ -795,7 +851,9 @@ function resolveScanEntry(
  *     name: only a `route: '/'` mount can produce one, and the `/app` mount serving
  *     `/app/v1/page.html` is walked (that arm asserts 200 + named, so a skip by name goes red);
  *   - a DOT-SEGMENT entry is skipped — `isSafeStaticPath`'s check (a) refuses any REQUEST-path
- *     segment beginning with `.`, so nothing under it is servable UNDER THAT NAME. Reachable it may
+ *     segment beginning with `.`, so nothing under it is servable UNDER THAT NAME. The one name
+ *     check (a) lets through is walked, on the same terms: `.well-known` at the top of a
+ *     `route: '/'` mount, which is where `servedPath` is still empty. Reachable a dot entry may
  *     still be, through an in-tree link from elsewhere in the tree; that is the next bullet's job,
  *     and it is how a `dist/index.html -> dist/.build/index.html` build gets covered;
  *   - a SYMLINK is FOLLOWED when `resolveScanEntry` proves its target inside the mount's real
@@ -834,7 +892,8 @@ function scanHtmlTree(
   }
   for (const entry of [...entries].sort((a, b) => (a.name < b.name ? -1 : 1))) {
     if (state.filesTruncated) return; // a declined file already settled it
-    if (entry.name.startsWith('.')) continue;
+    const wellKnown = servedPath === '' && entry.name === WELL_KNOWN_SEGMENT;
+    if (entry.name.startsWith('.') && !wellKnown) continue;
     const served = `${servedPath}/${entry.name}`;
     if (isReservedRoutePath(served)) continue; // the mount declines this request before serving
     const resolved = resolveScanEntry(entry, realDir, realMountDir);
@@ -1031,6 +1090,8 @@ export function mountFrontend<E extends Env>(
 
   for (const mount of ordered) {
     const { route, spa, cleanUrls } = mount;
+    // Only the mount at the origin root serves `/.well-known/` (see the module header).
+    const allowWellKnown = route === '/';
     const baseDir = resolve(specDir, mount.dir);
     // Pre-resolve the served directory's real path once (the boot guard already proved it exists +
     // is a directory). If it cannot be resolved, fall back to baseDir — serveStatic then misses.
@@ -1109,7 +1170,7 @@ export function mountFrontend<E extends Env>(
       const subPath = route === '/' ? decoded : decoded.slice(route.length);
       // Fail-closed guard BEFORE serving — a refused path skips the file/SPA server entirely and
       // falls through to the platform's uniform 404 (never the SPA shell).
-      if (!isSafeStaticPath(baseDir, realBaseDir, subPath)) return next();
+      if (!isSafeStaticPath(baseDir, realBaseDir, subPath, allowWellKnown)) return next();
       // …and the guard must inspect the name that will actually be READ, not only the one decoded
       // here. The two decoders diverge on a percent-encoded reserved character: this handler decodes
       // with `decodeURIComponent`, the file server with `decodeURI`. For `/docs%2Fgetting-started`
@@ -1124,11 +1185,19 @@ export function mountFrontend<E extends Env>(
       const servedFullPath = decodeAsServed(c.req.path);
       const servedSubPath = route === '/' ? servedFullPath : servedFullPath.slice(route.length);
       if (servedSubPath !== subPath) {
-        if (!isSafeStaticPath(baseDir, realBaseDir, servedSubPath)) return next();
-        if (cleanUrls && !isSafeStaticPath(baseDir, realBaseDir, `${servedSubPath}.html`)) {
+        if (!isSafeStaticPath(baseDir, realBaseDir, servedSubPath, allowWellKnown)) return next();
+        if (
+          cleanUrls &&
+          !isSafeStaticPath(baseDir, realBaseDir, `${servedSubPath}.html`, allowWellKnown)
+        ) {
           return next();
         }
       }
+      // A miss under `/.well-known/` ends in a 404 and never in the SPA shell: the clients of these
+      // paths take a 200 for the document itself. The router hands over the path with the directory
+      // name already decoded (`/%2ewell-known/x` arrives as `/.well-known/x`), so the name the file
+      // server reads has `.well-known` as its first segment exactly when `subPath` has.
+      const spaFallback = spa && !(allowWellKnown && isWellKnownPath(subPath));
       // RFC-7233: an UNSATISFIABLE Range (start at/after EOF, or reversed) gets a proper 416 rather than
       // serveStatic's malformed 0-byte 206 (closed beyond EOF) or ERR_OUT_OF_RANGE → 500 (open beyond
       // EOF). Runs AFTER the fail-closed guard (a refused path already 404'd) and ONLY when a Range
@@ -1143,8 +1212,9 @@ export function mountFrontend<E extends Env>(
           baseDir,
           realBaseDir,
           subPath,
-          spa,
+          spaFallback,
           cleanUrls,
+          allowWellKnown,
           rangeHeader,
         );
         if (rangeRes) return stamped(rangeRes);
@@ -1177,7 +1247,10 @@ export function mountFrontend<E extends Env>(
       // range and a non-content verb keep their exact responses; when no such file exists the request
       // falls through to the file server UNCHANGED, so `<path>/index.html`, the SPA fallback and the
       // terminal 404 all keep their turn in that order.
-      if (cleanUrlServer && resolveCleanUrlTarget(baseDir, realBaseDir, subPath) !== undefined) {
+      if (
+        cleanUrlServer &&
+        resolveCleanUrlTarget(baseDir, realBaseDir, subPath, allowWellKnown) !== undefined
+      ) {
         const cleanRes = await cleanUrlServer(c, noop);
         if (cleanRes) return stamped(cleanRes);
       }
@@ -1193,10 +1266,20 @@ export function mountFrontend<E extends Env>(
       const dirIndexSubPath = `${servedSubPath.replace(/\/+$/, '')}/index.html`;
       const dirIndexSafe =
         statSyncSafe(join(baseDir, servedSubPath))?.isDirectory() !== true ||
-        isSafeStaticPath(baseDir, realBaseDir, dirIndexSubPath);
+        isSafeStaticPath(baseDir, realBaseDir, dirIndexSubPath, allowWellKnown);
       const fileRes = dirIndexSafe ? await fileServer(c, noop) : undefined;
-      if (fileRes) return stamped(fileRes);
-      if (spaServer && isSafeStaticPath(baseDir, realBaseDir, '/index.html')) {
+      if (fileRes) {
+        // The file server types a file by its extension, and this one has none; it is JSON.
+        if (allowWellKnown && servedSubPath === APPLE_APP_SITE_ASSOCIATION_PATH) {
+          fileRes.headers.set('Content-Type', 'application/json');
+        }
+        return stamped(fileRes);
+      }
+      if (
+        spaServer &&
+        spaFallback &&
+        isSafeStaticPath(baseDir, realBaseDir, '/index.html', false)
+      ) {
         const spaRes = await spaServer(c, noop);
         if (spaRes) return stamped(spaRes);
       }

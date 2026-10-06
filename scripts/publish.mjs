@@ -70,19 +70,35 @@
  *                  are on disk to inspect (the child's own output is captured, not printed).
  *   --dry-run      `pnpm publish --dry-run --no-git-checks` each target (the default). Simulates the
  *                  publish incl. workspace resolution; no registry write. Tokenless in normal operation
- *                  (if your registry demands auth even for a dry-run, use --pack instead).
- *   --publish      REAL `pnpm publish`. Double-gated: also requires `--yes-really-publish` AND
- *                  `RAYSPEC_ALLOW_PUBLISH=1`. Publishes in dependency order (deps before dependents).
- *                  Intended for the founder-run release window only.
+ *                  (if your registry demands auth even for a dry-run, use --pack instead). npm asks
+ *                  the registry in a dry run too, and refuses a version that is already published.
+ *   --publish      REAL publish. Double-gated: also requires `--yes-really-publish` AND
+ *                  `RAYSPEC_ALLOW_PUBLISH=1`. Publishes in dependency order (deps before dependents),
+ *                  each target with `--access public`, so a scoped package that is new in the
+ *                  release is created public. Intended for the founder-run release window only.
  *
  * PUBLISHING THE TESTED BYTES (--from <dir>)
  * --------------------------------------------
  * `--publish` and `--dry-run` repack each target by default, so the registry receives a tarball
  * nobody tested (packing is not byte-reproducible). With `--from <dir>` — the output of an earlier
  * `--pack` that the candidate conformance ran on — the run stamps nothing and hands each tarball to
- * `pnpm publish <file>` instead, in dependency order. Before the first call it refuses unless the
- * directory holds exactly one tarball per publish target, each declaring that target's name and the
- * release version. The release manifest's integrities then match the registry's.
+ * `npm publish <file>` (with `--dry-run` in a dry run) instead, in dependency order. Before the
+ * first call it refuses unless the directory holds exactly one tarball per publish target, each
+ * declaring that target's name and the release version. The release manifest's integrities then
+ * match the registry's.
+ *
+ * THE SECOND FACTOR
+ * -----------------
+ * A real publish runs attached to the terminal this script was started from: its child inherits
+ * stdin, stdout and stderr. An account whose two-factor authentication is a browser passkey gets an
+ * authentication URL from npm, which then waits on that terminal for the approval. npm waits only
+ * when both its stdin and its stdout are a terminal: with either one piped (`| tee publish.log`
+ * is enough) it cannot wait and the first target fails with EOTP, so do not pipe this script's
+ * output. `--otp <code>` hands a one-time code of an authenticator app to every publish call
+ * instead (a code is short-lived: when it expires part way, the run stops and the next run
+ * continues with a new code). The release workflow needs neither: its token bypasses the second
+ * factor. With `--json` the child's stdout goes to this script's stderr,
+ * so stdout stays the one JSON document.
  *
  * CONTINUING A PUBLISH THAT STOPPED PART WAY
  * ------------------------------------------
@@ -92,10 +108,17 @@
  * refuses the whole run before the first call (those bytes are public, and the release must move to
  * a new version); a lookup that fails for any reason other than "not found" refuses too. Running the
  * same publish again over the same tarballs therefore publishes exactly the targets that are
- * missing, from the release workflow, with provenance. The `rayspec` launcher always goes last, so
+ * missing (from the release workflow, with provenance). The `rayspec` launcher always goes last, so
  * the launcher being on npm means the whole closure is: the release workflow's guard reads that.
  *
- * Other flags: --version <v> (asserts the derived version) · --out <dir> (pack destination; a
+ * A publish call that fails stops the run: the manifests are restored, the failed target is named
+ * with the targets this run published before it, and the exit code is 1 (a dry run that fails
+ * names its target the same way). After a `--from` run the
+ * same command continues. A run without `--from` packed its own bytes and cannot be continued: what
+ * it published stays, and the next pack of those targets has other bytes.
+ *
+ * Other flags: --version <v> (asserts the derived version) · --otp <code> (with --publish only) ·
+ * --out <dir> (pack destination; a
  * relative path is resolved against the current working directory once, before anything is packed,
  * so every target lands in that ONE directory and the run prints the absolute path) ·
  * --json (machine output).
@@ -103,8 +126,9 @@
  * This script performs no git WRITES — it only READS the workspace state (`git ls-files`, tag identity)
  * and never creates a commit, a tag or a release. No package lifecycle hook runs it. CI runs it with
  * `--pack` for the consumer-install audit and the release candidate; a `--publish` runs only in the
- * release workflow, which a human dispatches. CI also executes a copy of it against a throwaway
- * fixture repo with the package manager stubbed (`scripts/publish.test.mjs`).
+ * release workflow, which a human dispatches, or on the owner's machine (docs/releasing.md describes
+ * both). CI also executes a copy of it against a throwaway fixture repo with the package manager
+ * and the registry stubbed (`scripts/publish.test.mjs`).
  */
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -129,6 +153,7 @@ function parseFlags(argv) {
     from: undefined,
     json: false,
     really: false,
+    otp: undefined,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -140,6 +165,7 @@ function parseFlags(argv) {
     else if (a === '--version') flags.version = argv[++i];
     else if (a === '--out') flags.out = argv[++i];
     else if (a === '--from') flags.from = argv[++i] ?? '';
+    else if (a === '--otp') flags.otp = argv[++i] ?? '';
     else {
       console.error(`unknown flag: ${a}`);
       process.exit(2);
@@ -593,6 +619,10 @@ function main() {
     console.error('--version requires a value (e.g. --version <x.y.z>)');
     process.exit(2);
   }
+  if (flags.otp !== undefined && !(flags.mode === 'publish' && /^\d+$/.test(flags.otp))) {
+    console.error('--otp <code> hands a one-time code (digits) to a --publish, and needs a value');
+    process.exit(2);
+  }
   if (flags.mode === 'publish' && !(flags.really && process.env[ALLOW_PUBLISH_ENV] === '1')) {
     console.error(
       'refusing to publish: a REAL registry write requires both --yes-really-publish and ' +
@@ -631,6 +661,9 @@ function main() {
 
   const backups = new Map();
   const results = [];
+  // The publish or dry-run call that failed, if one did. Reported after the manifests are restored: an exit
+  // inside the `try` would skip the `finally` and leave every target stamped and private:false.
+  let failed = null;
   try {
     // Phase 1 — stamp EVERY target first, so cross-package workspace:* refs all resolve to `version`.
     // Packed tarballs already carry the version, so nothing is stamped for them.
@@ -646,31 +679,53 @@ function main() {
         continue;
       }
       const pkgDir = dirname(pkgs.get(name).path);
+      // Without it npm creates a scoped package that is new in the release as a restricted one,
+      // which a free scope refuses and a paid one hides.
+      const access = ['--access', 'public'];
       let stdout = '';
       if (flags.mode === 'pack') {
         stdout = execFileSync('pnpm', ['pack', '--pack-destination', outDir], {
           cwd: pkgDir,
           encoding: 'utf8',
         });
-      } else if (flags.mode === 'dry-run') {
-        stdout = execFileSync(
-          'pnpm',
-          [
-            'publish',
-            ...(packed === null ? [] : [packed.get(name)]),
-            '--dry-run',
-            '--no-git-checks',
-          ],
-          { cwd: pkgDir, encoding: 'utf8' },
-        );
       } else {
-        stdout = execFileSync(
-          'pnpm',
-          ['publish', ...(packed === null ? [] : [packed.get(name)]), '--no-git-checks'],
-          { cwd: pkgDir, encoding: 'utf8' },
-        );
+        // A real publish is attached to the terminal, so npm can print its authentication URL and
+        // wait for the approval there; a dry run is captured like a pack. A packed tarball goes to
+        // npm as it is; a target packed by this run goes through pnpm, which rewrites its
+        // `workspace:*` dependencies while packing.
+        const real = flags.mode === 'publish';
+        const args = [
+          ...(real ? [] : ['--dry-run']),
+          ...access,
+          ...(flags.otp === undefined ? [] : [`--otp=${flags.otp}`]),
+        ];
+        const io = real
+          ? { stdio: ['inherit', flags.json ? 2 : 'inherit', 'inherit'] }
+          : { encoding: 'utf8' };
+        try {
+          stdout =
+            packed === null
+              ? execFileSync('pnpm', ['publish', '--no-git-checks', ...args], {
+                  cwd: pkgDir,
+                  ...io,
+                })
+              : execFileSync('npm', ['publish', packed.get(name), ...args], io);
+        } catch (err) {
+          // Never `err.message`: for a child that ended without an exit status it is the whole
+          // command line, one-time code included.
+          const tool = packed === null ? 'pnpm' : 'npm';
+          const reason =
+            err.status != null
+              ? `exit ${err.status}`
+              : err.signal
+                ? `${tool} was killed by ${err.signal}`
+                : `${tool} did not run: ${err.code ?? 'unknown error'}`;
+          failed = { name, reason };
+          results.push({ name, version, ok: false, stdout: '' });
+          break;
+        }
       }
-      results.push({ name, version, ok: true, stdout: stdout.trim() });
+      results.push({ name, version, ok: true, stdout: (stdout ?? '').trim() });
       if (!flags.json) console.log(`[${flags.mode}] ${name}@${version} ✓`);
     }
   } finally {
@@ -687,6 +742,7 @@ function main() {
     order,
     outDir: outDir ?? null,
     from: packed === null ? null : resolve(flags.from),
+    failed: failed?.name ?? null,
     results: results.map(({ name, version: v, ok, skipped }) => ({
       name,
       version: v,
@@ -695,7 +751,38 @@ function main() {
     })),
   };
   if (flags.json) console.log(JSON.stringify(summary, null, 2));
-  else {
+  if (failed !== null) {
+    console.error(`\n${flags.mode} of ${failed.name}@${version} failed (${failed.reason}).`);
+    if (flags.mode === 'publish') {
+      const done = results.filter((r) => r.ok && !r.skipped).map((r) => r.name);
+      console.error(
+        done.length
+          ? `published by this run before it (${done.length}): ${done.join(', ')}.`
+          : 'nothing was published by this run.',
+      );
+      // npm waits for a browser approval only when its stdin AND its stdout are a terminal. Its
+      // stdout is this script's stdout, or this script's stderr under --json.
+      const npmOut = flags.json ? process.stderr : process.stdout;
+      if ((!process.stdin.isTTY || !npmOut.isTTY) && flags.otp === undefined) {
+        console.error(
+          'this run was not attached to a terminal: npm cannot wait there for a browser approval ' +
+            'of the second factor. Run it from a terminal and do not pipe its output, or pass ' +
+            '--otp <code>.',
+        );
+      }
+      console.error(
+        packed === null
+          ? 'this run packed the targets itself, so it cannot be continued: what it published ' +
+              'stays public, and another pack has other bytes. Pack once (--pack) and publish ' +
+              'with --from <dir>.'
+          : 'fix the cause and run the same command again: it continues, skipping every package ' +
+              'npm already serves with the integrity of its tarball.',
+      );
+    } else console.error('a dry run writes nothing to the registry.');
+    console.error('working tree restored to committed bytes (private:true).');
+    process.exit(1);
+  }
+  if (!flags.json) {
     console.log(
       `\n${flags.mode}: ${order.length} package(s) at ${version} (from ${VERSION_SOURCE}).`,
     );

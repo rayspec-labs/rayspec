@@ -685,6 +685,11 @@ rayspec bundle sign <app-id>-<version>.ray --key-file <ed25519-private-key.pem> 
 - Every command writes one JSON envelope on stdout; read `ok`, `errors[0].code` and `errors[0].reason`.
   The refusals and their fixes are in `docs/packing.md`. An existing output needs `--force` — only
   with the user's approval.
+- `bundle verify` of a product bundle that requires `audio_input` or `media_playback` also writes a
+  line starting with `warning: media tools missing` to **stderr** when `ffmpeg` or `ffprobe` is not on
+  this machine. It is not in the envelope and does not change `ok` or the exit code. Pass it on to
+  the user: on a host without the tools the deployment serves, but no recording is transcribed or
+  playable (`docs/cli-reference.md`, "bundle verify").
 - `--build`, `--against` and `--allowlist` are refused in this release; do not use them.
 - Signing needs the user's own Ed25519 private key file (mode 0600, owned by them); never generate,
   read, print or move a key on their behalf. `bundle sign` writes `<file>.ray.sig`; the user hands out
@@ -1205,6 +1210,10 @@ Notes that matter:
 - Serving is fail-closed: path traversal (incl. URL-encoded forms), dotfiles/hidden paths, and symlinks
   that escape `dir` are refused; directories are never listed — the `cleanUrls` `<path>.html` candidate
   runs the same guard.
+- One dot path is served: `<dir>/.well-known/` of a `route: /` mount, for `/.well-known/security.txt`,
+  `assetlinks.json`, `apple-app-site-association` and the like. Only the exact first segment
+  `.well-known`, no dot segment below it, not under any other route; a miss there is a `404` even with
+  `spa: true` (never the `index.html` fallback).
 - `cleanUrls` is for a MULTI-PAGE site built by a static site generator; `spa` is for a single-page app.
   Do not reach for `spa: true` to fix broken extensionless links — it answers EVERY unmatched path with
   the root document, so a genuinely broken link comes back `200`. `cleanUrls` keeps `404` terminal (for

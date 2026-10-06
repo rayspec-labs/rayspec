@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * gen-image-sbom.mjs — the CycloneDX 1.5 SBOM of the npm packages inside a runtime image.
+ * gen-image-sbom.mjs — the CycloneDX 1.5 SBOM of the npm and Debian packages inside a runtime image.
  *
  * WHY A SECOND SBOM. `docs/closure-sbom.cdx.json` describes the published closure as the workspace
  * lockfile resolves it. The runtime image installs the release tarballs with npm, and npm resolves
@@ -14,10 +14,15 @@
  * every package it placed. Each component is one `name@version` with the SHA-512 npm checked it
  * against and the licence its manifest declares; a package installed at more than one place is
  * listed once. A `@rayspec` package's SHA-512 is that of the release tarball it was installed from,
- * which `scripts/release-manifest.mjs evidence` compares with the release manifest.
+ * which `scripts/release-manifest.mjs evidence` compares with the release manifest. From the same
+ * archive, `/var/lib/dpkg/status`, the record dpkg keeps: every Debian package installed in the
+ * image at its version and architecture, which covers the userland of the base image and ffmpeg
+ * with everything it depends on. An image whose record names no installed ffmpeg is refused, since
+ * the audio capability cannot run on it.
  *
- * WHAT IT DOES NOT DESCRIBE. Node itself and the Debian userland of the base image (pinned by digest
- * in the Dockerfile), and the PostgreSQL client tools copied from the pinned postgres image.
+ * WHAT IT DOES NOT DESCRIBE. Node itself (the base image is pinned by digest in the Dockerfile) and
+ * the PostgreSQL client tools copied from the pinned postgres image: neither is a package of the
+ * image's dpkg record. A Debian package carries no digest and no licence here; dpkg records neither.
  *
  * DETERMINISM. No timestamp, serial number or host: the same archive gives the same bytes.
  *
@@ -31,9 +36,15 @@ import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { purl } from './gen-closure-sbom.mjs';
 import { isEntryPoint } from './lib/entry.mjs';
-import { ManifestRefused, readImageWithFile } from './release-manifest.mjs';
+import { ManifestRefused, readImageWithFiles } from './release-manifest.mjs';
 
 export const INSTALLED_TREE = 'opt/rayspec/node_modules/.package-lock.json';
+/** The record dpkg keeps of the Debian packages of the image. */
+export const DPKG_STATUS = 'var/lib/dpkg/status';
+/** The distribution the image is built on (`/etc/os-release` is a link to it). */
+export const OS_RELEASE = 'usr/lib/os-release';
+/** The Debian package that carries both ffmpeg and ffprobe. */
+export const FFMPEG_PACKAGE = 'ffmpeg';
 const byCodePoint = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
@@ -51,11 +62,55 @@ export function packageNameAt(path) {
   return /^(?:@[^/]+\/)?[^/@][^/]*$/.test(name) ? name : null;
 }
 
+/** The fields of one stanza of a dpkg record or of an os-release file's lines. */
+function fields(text, separator) {
+  const out = new Map();
+  for (const line of text.split('\n')) {
+    // A line that starts with a space continues the field before it (a description, a file list).
+    if (line === '' || /^\s/.test(line)) continue;
+    const at = line.indexOf(separator);
+    if (at > 0) out.set(line.slice(0, at), line.slice(at + separator.length).trim());
+  }
+  return out;
+}
+
 /**
- * The SBOM of an image, from its facts (`readOciImage`) and the bytes of its installed tree. Refuses
- * a tree that names no rayspec launcher at the image's version, and a package without a version.
+ * The Debian packages a dpkg record (`/var/lib/dpkg/status`) names as installed, with the
+ * distribution they belong to from the image's os-release file. A package dpkg only remembers the
+ * configuration of is not installed and is left out. Refuses an installed package without a version
+ * or an architecture, and an os-release file that names no distribution and release.
  */
-export function imageSbom(image, treeBytes) {
+export function debianPackages(statusBytes, osReleaseBytes) {
+  const os = fields(osReleaseBytes.toString('utf8'), '=');
+  const unquoted = (value) => (value ?? '').replace(/^"(.*)"$/, '$1');
+  const id = unquoted(os.get('ID'));
+  const release = unquoted(os.get('VERSION_ID'));
+  if (!/^[a-z0-9]+$/.test(id) || !/^[0-9.]+$/.test(release)) {
+    refuse(`/${OS_RELEASE} in the image names no distribution and release`);
+  }
+  const packages = [];
+  for (const stanza of statusBytes.toString('utf8').split(/\n{2,}/)) {
+    const entry = fields(stanza, ':');
+    const name = entry.get('Package');
+    if (name === undefined || entry.get('Status') !== 'install ok installed') continue;
+    const version = entry.get('Version');
+    const arch = entry.get('Architecture');
+    if (!version || !arch) refuse(`${name} in the image's dpkg record has no version`);
+    packages.push({
+      ref: `pkg:deb/${id}/${encodeURIComponent(name)}@${encodeURIComponent(version)}?arch=${arch}&distro=${id}-${release}`,
+      name,
+      version,
+    });
+  }
+  return packages;
+}
+
+/**
+ * The SBOM of an image, from its facts (`readOciImage`), the bytes of its installed tree and the
+ * bytes of its dpkg record and os-release file. Refuses a tree that names no rayspec launcher at
+ * the image's version, a package without a version, and a dpkg record without an installed ffmpeg.
+ */
+export function imageSbom(image, treeBytes, { status, osRelease }) {
   let tree;
   try {
     tree = JSON.parse(treeBytes.toString('utf8'));
@@ -95,6 +150,10 @@ export function imageSbom(image, treeBytes) {
   const launcher = components.get(purl('rayspec', version));
   if (launcher === undefined)
     refuse(`the image's installed tree holds no rayspec ${version} launcher`);
+  const system = debianPackages(status, osRelease);
+  if (!system.some((p) => p.name === FFMPEG_PACKAGE)) {
+    refuse(`the image's dpkg record names no installed ${FFMPEG_PACKAGE} package`);
+  }
   const digestHex = image.digest.slice('sha256:'.length);
   const containerRef = `pkg:oci/rayspec@sha256%3A${digestHex}?arch=amd64`;
   const doc = {
@@ -118,18 +177,27 @@ export function imageSbom(image, treeBytes) {
         { name: 'rayspec:node-version', value: image.nodeVersion ?? 'not named by the image' },
         { name: 'rayspec:installed-tree', value: `/${INSTALLED_TREE}` },
         { name: 'rayspec:installed-tree-sha256', value: sha256(treeBytes) },
+        { name: 'rayspec:dpkg-record', value: `/${DPKG_STATUS}` },
+        { name: 'rayspec:dpkg-record-sha256', value: sha256(status) },
         {
           name: 'rayspec:scope',
           value:
-            'Every npm package installed under /opt/rayspec in the image. Node and the Debian ' +
-            'userland of the base image, pinned by digest in the Dockerfile, and the PostgreSQL ' +
-            'client tools are not listed.',
+            'Every npm package installed under /opt/rayspec in the image, and every Debian ' +
+            'package its dpkg record names as installed, ffmpeg among them. Node, which the base ' +
+            'image pinned by digest in the Dockerfile brings, and the PostgreSQL client tools ' +
+            'are not listed.',
         },
       ],
     },
-    components: [...components.values()]
-      .sort((a, b) => byCodePoint(a.ref, b.ref))
-      .map((c) => ({
+    components: [
+      ...system.map((p) => ({
+        type: 'library',
+        'bom-ref': p.ref,
+        name: p.name,
+        version: p.version,
+        purl: p.ref,
+      })),
+      ...[...components.values()].map((c) => ({
         type: 'library',
         'bom-ref': c.ref,
         name: c.name,
@@ -142,6 +210,7 @@ export function imageSbom(image, treeBytes) {
           .sort(byCodePoint)
           .map((path) => ({ name: 'rayspec:installed-at', value: `/opt/rayspec/${path}` })),
       })),
+    ].sort((a, b) => byCodePoint(a['bom-ref'], b['bom-ref'])),
   };
   return `${JSON.stringify(doc, null, 2)}\n`;
 }
@@ -167,9 +236,12 @@ export function main(argv = process.argv.slice(2)) {
   }
   try {
     const archive = resolve(values['image-oci']);
-    const { image, file: tree } = readImageWithFile(archive, INSTALLED_TREE);
+    const { image, files } = readImageWithFiles(archive, [INSTALLED_TREE, DPKG_STATUS, OS_RELEASE]);
+    const [tree, status, osRelease] = files;
     if (tree === null) refuse(`the image holds no /${INSTALLED_TREE}`);
-    const text = imageSbom(image, tree);
+    if (status === null) refuse(`the image holds no /${DPKG_STATUS}`);
+    if (osRelease === null) refuse(`the image holds no /${OS_RELEASE}`);
+    const text = imageSbom(image, tree, { status, osRelease });
     writeFileSync(resolve(values.out), text);
     const count = JSON.parse(text).components.length;
     process.stderr.write(

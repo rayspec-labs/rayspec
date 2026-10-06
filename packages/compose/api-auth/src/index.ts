@@ -97,6 +97,9 @@ export { makeTenantEventBus } from './engine/event-bus.js';
 // `GET /v1/subscribe` deliver immediately rather than within one poll interval, and nothing keys
 // correctness on it (a subscriber's own periodic read is the delivery guarantee).
 export { makeTenantEventWake, type TenantEventWakeHub } from './engine/event-wake.js';
+// Whether a trusted-proxy entry names a range at all. The composition root checks every
+// RAYSPEC_TRUSTED_PROXIES entry with it at boot, by the same reading the request path matches with.
+export { isTrustedProxyRange } from './http/client-ip.js';
 // The HTTP half of a source fence: refuse mutations with 503 while fenced, close open streams on the
 // drain. The runtime implements `WriteFence`; the app registers the middleware when one is wired.
 export {

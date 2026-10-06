@@ -321,6 +321,26 @@ describe('secrets', () => {
     ]);
   });
 
+  it("carries a frontend directory's .well-known files, which a root mount serves", async () => {
+    const root = temporaryDirectory();
+    writeTree(root, {
+      'rayspec.yaml': backendSpec('frontend:\n  - { route: /, dir: web }\n'),
+      'web/index.html': '<p>hi</p>',
+      'web/.well-known/security.txt': 'Contact: mailto:security@example.com\n',
+      'web/.well-known/assetlinks.json': '[]',
+      'web/.well-known/.env': 'X=1\n',
+    });
+    const closure = await accepted(root);
+    expect(paths(closure).filter((p) => p.startsWith('payload/web/'))).toEqual([
+      'payload/web/.well-known/assetlinks.json',
+      'payload/web/.well-known/security.txt',
+      'payload/web/index.html',
+    ]);
+    expect(closure.excluded).toEqual([
+      { source: 'web/.well-known/.env', reason: 'an environment file' },
+    ]);
+  });
+
   it('leaves out environment and credential files in any letter case and their common variants', async () => {
     const root = temporaryDirectory();
     const canary = 'CANARY_VALUE_0123456789';

@@ -1,7 +1,7 @@
 /**
  * The hosting boot settings, parsed fail-closed like every other boot setting:
- * RAYSPEC_HOSTING_POSTURE (`local` or `managed`), RAYSPEC_SHUTDOWN_DRAIN_MS (0 to ten minutes) and
- * RAYSPEC_SINGLE_TENANT (`true` or `false`).
+ * RAYSPEC_HOSTING_POSTURE (`local` or `managed`), RAYSPEC_SHUTDOWN_DRAIN_MS (0 to ten minutes),
+ * RAYSPEC_SINGLE_TENANT (`true` or `false`) and RAYSPEC_TRUSTED_PROXIES (addresses and CIDR ranges).
  * An unset or blank value is the default; anything else that is not exactly valid refuses the boot.
  */
 import type { Db } from '@rayspec/db';
@@ -17,6 +17,7 @@ import {
   parseHostingPosture,
   parseShutdownDrainMs,
   parseSingleTenantMode,
+  parseTrustedProxies,
 } from './composition-root.js';
 import { createRuntimeControl } from './runtime-control.js';
 import { SUPPORTED_BACKEND_MATRIX } from './supported-backends.js';
@@ -85,6 +86,52 @@ describe('RAYSPEC_SINGLE_TENANT', () => {
       true,
     );
     expect(() => loadServerConfig({ ...base, RAYSPEC_SINGLE_TENANT: 'yes' }, warn)).toThrow(
+      BootConfigError,
+    );
+  });
+});
+
+describe('RAYSPEC_TRUSTED_PROXIES', () => {
+  it('defaults to an empty list when unset or blank, and drops blank entries', () => {
+    expect(parseTrustedProxies({})).toEqual([]);
+    expect(parseTrustedProxies({ RAYSPEC_TRUSTED_PROXIES: ' , ' })).toEqual([]);
+    expect(parseTrustedProxies({ RAYSPEC_TRUSTED_PROXIES: '10.0.0.0/8, ,::1' })).toEqual([
+      '10.0.0.0/8',
+      '::1',
+    ]);
+  });
+
+  it('accepts addresses and ranges of both families, mapped spellings included', () => {
+    const list = '10.0.0.0/8,127.0.0.1,::1/128,2001:db8::/32,::ffff:10.0.0.0/104,::ffff:10.0.0.0/8';
+    expect(parseTrustedProxies({ RAYSPEC_TRUSTED_PROXIES: list })).toEqual(list.split(','));
+  });
+
+  it.each([
+    '10.0.0.0/',
+    '10.0.0.0/33',
+    '10.0.0.0/8.0',
+    '10.0.0.0/0x8',
+    '::/',
+    '::/129',
+    'proxy.internal',
+  ])('refuses %s and names it', (entry) => {
+    const env = { RAYSPEC_TRUSTED_PROXIES: `10.0.0.0/8, ${entry}` };
+    expect(() => parseTrustedProxies(env)).toThrow(BootConfigError);
+    expect(() => parseTrustedProxies(env)).toThrow(`'${entry}'`);
+  });
+
+  it('reaches the boot configuration, and a bad entry refuses it', () => {
+    const base = {
+      DATABASE_URL: 'postgres://u:p@localhost:5432/db',
+      RAYSPEC_JWT_SIGNING_KEY: 'k',
+      RAYSPEC_API_KEY_PEPPER: 'p',
+    };
+    const warn = () => {};
+    expect(loadServerConfig(base, warn).trustedProxies).toEqual([]);
+    expect(
+      loadServerConfig({ ...base, RAYSPEC_TRUSTED_PROXIES: '10.0.0.0/8' }, warn).trustedProxies,
+    ).toEqual(['10.0.0.0/8']);
+    expect(() => loadServerConfig({ ...base, RAYSPEC_TRUSTED_PROXIES: '10.0.0.0/' }, warn)).toThrow(
       BootConfigError,
     );
   });

@@ -8,12 +8,14 @@ name: Release candidate
 #
 #   build        the tarballs, the release identity manifest, the CycloneDX SBOM of the closure, the
 #                linux/amd64 runtime image as an OCI archive with the lockfile it was installed from
-#                and the CycloneDX SBOM of its installed tree, and the release manifest; the
-#                image's tree is scanned for known advisories.
+#                and the CycloneDX SBOM of its installed tree and its Debian packages, and the
+#                release manifest; the image's npm tree is scanned for known advisories. The image
+#                build installs ffmpeg and fails unless it stitches two Ogg-Opus chunks.
 #   conformance  the tarballs installed into an empty directory as a consumer; the contract corpus
 #                and the three reference application journeys (and the quickstart) through that
-#                install; the runtime image loaded from the archive, checked, the corpus run through
-#                its CLI, a reference application served from it, and the three journeys again with
+#                install; the runtime image loaded from the archive, checked (its ffmpeg and
+#                ffprobe through the audio capability it installed), the corpus run through its
+#                CLI, a reference application served from it, and the three journeys again with
 #                every rayspec command in a container of it.
 #   upgrade      the upgrade-with-data harness from 1.7.0 and from 1.8.0 onto the candidate install.
 #

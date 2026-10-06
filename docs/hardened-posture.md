@@ -25,6 +25,22 @@ residual risk this release accepts are in the [Threat model](./threat-model.md).
 `RAYSPEC_SINGLE_TENANT` accepts exactly `true` or `false`; any other value refuses the boot, so a
 typo never leaves the limit off by accident.
 
+`RAYSPEC_TRUSTED_PROXIES` is a comma-separated list of addresses and CIDR ranges. A peer on a
+dual-stack socket reports an IPv4 client as an IPv4-mapped IPv6 address; such an address is the
+IPv4 address it carries, in every spelling (`::ffff:10.1.2.3`, `::ffff:a01:203`, the fully expanded
+form), and is matched against the IPv4 entries of the list. An entry written inside the mapped
+block is the IPv4 range it carries, in either notation: with an IPv6-length prefix
+(`::ffff:10.0.0.0/104` is `10.0.0.0/8`, `::ffff:0:0/96` is every IPv4 address), or as a dotted
+address with an IPv4-length prefix (`::ffff:10.0.0.0/8` is `10.0.0.0/8` too). An IPv6 entry wider
+than that block (`::/8`, `::/0`) covers IPv6 peers only, so an IPv4 proxy is trusted only by an
+entry that names it. That holds for an entry written in hex groups too: `::ffff:a00:0/8` is the
+IPv6 range `::/8`, which boots, trusts `::1` and trusts no IPv4 proxy, although its dotted twin
+`::ffff:10.0.0.0/8` is `10.0.0.0/8`; write an IPv4 range dotted, or with a prefix of 96 or more. An entry that names no range refuses the boot, and the message names the
+entry: an address that does not parse, a prefix length that is missing, malformed or wider than
+the address (`10.0.0.0/`, `10.0.0.0/8.0`, `10.0.0.0/33`), or a dotted mapped address with a prefix
+between the two notations (`::ffff:10.0.0.0/64`). Such an entry could match no peer, and the proxy
+it stands for would stay untrusted.
+
 ## Turning it on
 
 1. **Create the database roles** and point the runtime at them, as

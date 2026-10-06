@@ -19,6 +19,10 @@
  * the bundle go to stderr. The description says what the bundle is and which checks passed; it
  * never vouches for the code the bundle carries.
  *
+ * `verify` adds one thing about the host it runs on: when the bundle requires an audio capability
+ * and ffmpeg or ffprobe cannot be found here, a warning line on stderr says so, with or without
+ * `--json` (media-tools.ts). The envelope and the exit code are unchanged by it.
+ *
  * The import graph of this module is the bundle codec, the contract, the spec grammar and Node's
  * own modules: no server, database layer or handler loader is loaded to inspect or verify a bundle.
  */
@@ -42,6 +46,7 @@ import {
   V1_EXECUTION_LEVELS,
 } from '@rayspec/bundle-contract';
 import { type Envelope, envelope, usageEnvelope } from './envelope.js';
+import { mediaToolNotices } from './media-tools.js';
 
 /** A problem with the `bundle` group itself (no or an unknown subcommand): exit 2 in index.ts. */
 export class BundleCliError extends Error {}
@@ -67,6 +72,8 @@ export interface BundleRunOptions {
   readerLimits?: Partial<ReaderLimits>;
   /** Whether `--json` was given; index.ts takes the flag off the vector before the verb parses it. */
   json?: boolean;
+  /** Where `verify` looks for ffmpeg and ffprobe (PATH and the two overrides). Default: `process.env`. */
+  env?: NodeJS.ProcessEnv;
 }
 
 export interface BundleOutcome {
@@ -75,6 +82,8 @@ export interface BundleOutcome {
   summary: string[];
   /** Whether `--json` was given. */
   json: boolean;
+  /** Warnings about this host for stderr, written with or without `--json`. */
+  notices?: string[];
 }
 
 /** The data of a `bundle inspect` envelope. */
@@ -297,6 +306,10 @@ async function runVerify(
     verdict: 'not-deployable',
   };
   const warnings: BundleWarning[] = [];
+  const notices =
+    manifest.kind === 'application'
+      ? mediaToolNotices(manifest.requires, options.env ?? process.env)
+      : [];
   const profile = (options.runtimeProfile ?? cliRuntimeProfile)(parsed.runtime);
 
   const errors = await verifySteps(
@@ -309,13 +322,17 @@ async function runVerify(
     warnings,
   );
   if (errors.length > 0) {
-    return refused(envelope(operation, options.operationId, data, errors, warnings), parsed.json, [
-      ...describe(manifest, data.sha256, read.value.archiveSize, read.value.entryCount),
-      `checked against runtime ${parsed.runtime}`,
-    ]);
+    return {
+      ...refused(envelope(operation, options.operationId, data, errors, warnings), parsed.json, [
+        ...describe(manifest, data.sha256, read.value.archiveSize, read.value.entryCount),
+        `checked against runtime ${parsed.runtime}`,
+      ]),
+      notices,
+    };
   }
   data.verdict = 'deployable';
   return {
+    notices,
     envelope: envelope(operation, options.operationId, data, [], warnings),
     summary: [
       ...describe(manifest, data.sha256, read.value.archiveSize, read.value.entryCount),

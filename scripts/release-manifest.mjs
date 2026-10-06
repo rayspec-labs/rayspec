@@ -376,12 +376,20 @@ export function readImageFile(path, filePath) {
  * through one open of the archive, so both describe the same bytes.
  */
 export function readImageWithFile(path, filePath) {
-  const wanted = filePath.replace(/^\/+/, '');
-  const slash = wanted.lastIndexOf('/');
-  const whiteout = `${wanted.slice(0, slash + 1)}.wh.${wanted.slice(slash + 1)}`;
+  const { image, files } = readImageWithFiles(path, [filePath]);
+  return { image, file: files[0] };
+}
+
+/** The same for several files, in the order asked: each is its bytes, or null. */
+export function readImageWithFiles(path, filePaths) {
   return withOciImage(path, (opened) => ({
     image: imageFacts(opened),
-    file: fileOfLayers(opened, wanted, whiteout),
+    files: filePaths.map((filePath) => {
+      const wanted = filePath.replace(/^\/+/, '');
+      const slash = wanted.lastIndexOf('/');
+      const whiteout = `${wanted.slice(0, slash + 1)}.wh.${wanted.slice(slash + 1)}`;
+      return fileOfLayers(opened, wanted, whiteout);
+    }),
   }));
 }
 

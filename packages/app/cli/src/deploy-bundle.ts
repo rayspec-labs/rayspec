@@ -34,6 +34,11 @@
  * `deploy` for a deploy, written when the deploy refuses or, once it serves, when it stops. Progress,
  * the boot banner and the operation id go to stderr, and so does anything else written to stdout
  * while the verb runs (the durable runtime's startup lines, a handler's `console.log`).
+ *
+ * MEDIA TOOLS. A dry-run of a bundle that requires an audio capability on a host where ffmpeg or
+ * ffprobe cannot be found writes a warning line to stderr, with or without `--json`, as soon as the
+ * bundle is read and whatever the plan then says (media-tools.ts). The deploy itself is unchanged:
+ * it serves, and the capability fails closed when it reaches for the tool.
  */
 import { createPublicKey, type KeyObject } from 'node:crypto';
 import { constants } from 'node:fs';
@@ -60,6 +65,7 @@ import type { ReadApplicationBundle, SupervisorConnection } from '@rayspec/serve
 import { MAX_BINDINGS_FILE_BYTES, parseBindingsFile } from './bindings-file.js';
 import type { ServeReport } from './deploy.js';
 import { type Envelope, type EnvelopeSink, envelope, reserveStdout } from './envelope.js';
+import { mediaToolNotices } from './media-tools.js';
 
 /** Bytes a ZIP archive starts with: a local file header, or the end record of an empty archive. */
 const ZIP_SIGNATURES: readonly (readonly number[])[] = [
@@ -185,8 +191,11 @@ export interface DeployData {
 }
 
 export type BundleDeployOutcome =
-  /** The verb answered: write the envelope and exit with its class. */
-  | { kind: 'envelope'; envelope: Envelope; summary: string[] }
+  /**
+   * The verb answered: write the envelope and exit with its class. `notices` are warnings about
+   * this host for stderr, written with or without `--json`.
+   */
+  | { kind: 'envelope'; envelope: Envelope; summary: string[]; notices?: string[] }
   /** The deployment serves; it writes its own envelope when it stops. */
   | { kind: 'served' };
 
@@ -407,6 +416,7 @@ export async function runDeployBundle(
     ? 'deploy.dry-run'
     : 'deploy';
   let warnings: BundleWarning[] = [];
+  let notices: string[] = [];
   try {
     const parsed = parse(args);
     operation = parsed.dryRun ? 'deploy.dry-run' : 'deploy';
@@ -414,6 +424,9 @@ export async function runDeployBundle(
       safePoint,
       warn: (w) => {
         warnings = w;
+      },
+      notice: (lines) => {
+        notices = lines;
       },
       applying: () => {
         phase = 'applying';
@@ -427,7 +440,7 @@ export async function runDeployBundle(
     });
     if (outcome.kind === 'served') return outcome;
     release();
-    return outcome;
+    return { ...outcome, notices };
   } catch (err) {
     release();
     if (err instanceof Interrupted) {
@@ -439,7 +452,9 @@ export async function runDeployBundle(
         ),
       ]);
     }
-    if (err instanceof Refused) return answer(operation, options, err.data, err.errors, warnings);
+    if (err instanceof Refused) {
+      return { ...answer(operation, options, err.data, err.errors, warnings), notices };
+    }
     throw err;
   }
 }
@@ -451,7 +466,7 @@ function answer(
   errors: BundleError[],
   warnings: BundleWarning[] = [],
   summary: string[] = [],
-): BundleDeployOutcome {
+): Extract<BundleDeployOutcome, { kind: 'envelope' }> {
   const result = envelope(operation, options.operationId, data, errors, warnings);
   const first = result.errors[0];
   return {
@@ -470,6 +485,8 @@ function answer(
 interface Hooks {
   safePoint(): void;
   warn(warnings: BundleWarning[]): void;
+  /** Warnings about this host, for stderr. */
+  notice(lines: string[]): void;
   applying(): void;
   /** False when a signal arrived during the apply: the boot then stops instead of serving. */
   applied(): boolean;
@@ -537,6 +554,8 @@ async function deploy(
   if (!read.ok) throw new Refused(read.errors);
   const bundle = read.value;
   const bundleSha256 = bundle.inspection.archiveSha256;
+  // A dry-run says beforehand what the audio capability would only find when it stitches a recording.
+  if (parsed.dryRun) hooks.notice(mediaToolNotices(bundle.manifest.requires, env));
 
   // The bindings file's names: a reserved name comes only from the operator's environment.
   for (const [i, name] of [...fileValues.keys()].entries()) {

@@ -28,6 +28,12 @@
  *     LAST segment decides, so a dotted directory (`/guide/1.2/notes`) still resolves. The guard, the
  *     range guard and the method guard all still run first (a dotfile, a `.html` symlink escaping the
  *     dir, an unsatisfiable range and a write verb keep their exact responses).
+ *   - WELL-KNOWN: a `route: '/'` mount serves its top-level `.well-known` directory (`security.txt`
+ *     as text/plain, `.json` and `apple-app-site-association` as application/json) while every other
+ *     dot path stays a 404 — a sibling dotfile, a dot segment below `.well-known`, a `.well-known`
+ *     that is not the first segment or sits under a non-root mount, a differently-cased spelling, a
+ *     traversal through it and a symlink leading out of it. A miss under it is a 404 on an spa:true
+ *     mount too, never the shell.
  *   - CONTENT METHODS: a mount serves GET/HEAD/OPTIONS; every other verb gets 405 + `Allow` and the
  *     uniform JSON envelope — so a POST/DELETE to a missing path under an spa:true mount is never
  *     answered 200 with the SPA shell — while the reserved-prefix decline and the fail-closed path
@@ -1398,6 +1404,269 @@ describe('mountFrontend — the guard covers every name the file server reads', 
       const res = await app.request(path);
       expect(res.status, path).toBe(404);
       expect(await res.text(), path).not.toContain(OUTSIDE);
+    }
+  });
+});
+
+describe('mountFrontend — /.well-known/ on a root mount (RFC 8615)', () => {
+  const SECURITY_TXT = 'Contact: mailto:security@example.com\nExpires: 2030-01-01T00:00:00.000Z\n';
+  const ASSETLINKS = '[{"relation":["delegate_permission/common.handle_all_urls"]}]';
+  const ASSOCIATION = '{"applinks":{"details":[]}}';
+  const SHELL = 'WELL-KNOWN-SPA-SHELL';
+  const NOT_FOUND_PAGE = 'WELL-KNOWN-CUSTOM-404';
+  const HIDDEN = 'WELL-KNOWN-HIDDEN-must-never-serve';
+  const OUTSIDE = 'WELL-KNOWN-OUTSIDE-must-never-serve';
+
+  let root = '';
+  const spa: FrontendSpec = { route: '/', dir: 'web/dist', spa: true, cleanUrls: false };
+  const plain: FrontendSpec = { route: '/', dir: 'web/dist', spa: false, cleanUrls: false };
+  const clean: FrontendSpec = { route: '/', dir: 'web/dist', spa: false, cleanUrls: true };
+  const cleanSpa: FrontendSpec = { route: '/', dir: 'web/dist', spa: true, cleanUrls: true };
+
+  beforeAll(() => {
+    root = mkdtempSync(join(tmpdir(), 'rayspec-well-known-'));
+    const dir = join(root, 'web', 'dist');
+    const outside = join(root, 'outside');
+    mkdirSync(join(dir, '.well-known', '.private'), { recursive: true });
+    mkdirSync(join(dir, '.well-known', 'acme-challenge'), { recursive: true });
+    mkdirSync(join(dir, 'a', '.well-known'), { recursive: true });
+    mkdirSync(join(dir, '.git'), { recursive: true });
+    mkdirSync(outside, { recursive: true });
+
+    writeFileSync(join(dir, 'index.html'), `<!doctype html><title>${SHELL}</title>`, 'utf8');
+    writeFileSync(join(dir, '.well-known', 'security.txt'), SECURITY_TXT, 'utf8');
+    writeFileSync(join(dir, '.well-known', 'assetlinks.json'), ASSETLINKS, 'utf8');
+    writeFileSync(join(dir, '.well-known', 'apple-app-site-association'), ASSOCIATION, 'utf8');
+    writeFileSync(join(dir, '.well-known', 'change-password.html'), '<p>change</p>', 'utf8');
+    writeFileSync(join(dir, '.well-known', 'acme-challenge', 'token'), 'token.thumbprint', 'utf8');
+    // Everything below must stay hidden.
+    writeFileSync(join(dir, '.env'), HIDDEN, 'utf8');
+    writeFileSync(join(dir, '.git', 'config'), HIDDEN, 'utf8');
+    writeFileSync(join(dir, '.well-known', '.secret'), HIDDEN, 'utf8');
+    writeFileSync(join(dir, '.well-known', '.private', 'key.txt'), HIDDEN, 'utf8');
+    writeFileSync(join(dir, 'a', '.well-known', 'x'), HIDDEN, 'utf8');
+    writeFileSync(join(outside, 'secret.txt'), OUTSIDE, 'utf8');
+    symlinkSync(join(outside, 'secret.txt'), join(dir, '.well-known', 'leak.txt'));
+    symlinkSync(outside, join(dir, '.well-known', 'linked'));
+  });
+
+  afterAll(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  for (const [label, mount] of [
+    ['spa:false', plain],
+    ['spa:true', spa],
+    ['cleanUrls:true', clean],
+  ] as const) {
+    it(`${label} — /.well-known/security.txt is served as text/plain`, async () => {
+      const res = await buildApp([mount], root).request('/.well-known/security.txt');
+      expect(res.status).toBe(200);
+      expect(res.headers.get('content-type')).toMatch(/^text\/plain/);
+      expect(await res.text()).toBe(SECURITY_TXT);
+    });
+  }
+
+  it('a .json file is served as application/json, and a nested file below .well-known is served', async () => {
+    const app = buildApp([spa], root);
+    const links = await app.request('/.well-known/assetlinks.json');
+    expect(links.status).toBe(200);
+    expect(links.headers.get('content-type')).toMatch(/^application\/json/);
+    expect(await links.text()).toBe(ASSETLINKS);
+    const token = await app.request('/.well-known/acme-challenge/token');
+    expect(token.status).toBe(200);
+    expect(await token.text()).toBe('token.thumbprint');
+  });
+
+  it('apple-app-site-association has no extension and is served as application/json', async () => {
+    const app = buildApp([plain], root);
+    const res = await app.request('/.well-known/apple-app-site-association');
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toBe('application/json');
+    expect(await res.text()).toBe(ASSOCIATION);
+    // Only that name: another file without an extension keeps the file server's type.
+    const token = await app.request('/.well-known/acme-challenge/token');
+    expect(token.headers.get('content-type')).toBe('application/octet-stream');
+  });
+
+  it('HEAD and a byte range work as for any other file; a write verb is a 405', async () => {
+    const app = buildApp([spa], root);
+    const head = await app.request('/.well-known/security.txt', { method: 'HEAD' });
+    expect(head.status).toBe(200);
+    expect(head.headers.get('content-length')).toBe(String(SECURITY_TXT.length));
+    expect(await head.text()).toBe('');
+    const range = await app.request('/.well-known/security.txt', {
+      headers: { Range: 'bytes=0-6' },
+    });
+    expect(range.status).toBe(206);
+    expect(await range.text()).toBe('Contact');
+    const post = await app.request('/.well-known/security.txt', { method: 'POST' });
+    expect(post.status).toBe(405);
+  });
+
+  const hidden: Array<{ name: string; path: string }> = [
+    { name: 'a sibling dotfile', path: '/.env' },
+    { name: 'a sibling dot directory', path: '/.git/config' },
+    { name: 'a dotfile below .well-known', path: '/.well-known/.secret' },
+    { name: 'a dot directory below .well-known', path: '/.well-known/.private/key.txt' },
+    { name: '.well-known that is not the first segment', path: '/a/.well-known/x' },
+    { name: 'a differently-cased spelling', path: '/.Well-Known/security.txt' },
+    { name: 'a traversal through .well-known', path: '/.well-known/../.env' },
+    { name: 'an encoded traversal through .well-known', path: '/.well-known/..%2f.env' },
+    { name: 'an encoded dot segment below .well-known', path: '/.well-known/%2e%2e/.env' },
+    {
+      name: 'a traversal out of the mount',
+      path: '/.well-known/..%2f..%2f..%2foutside/secret.txt',
+    },
+    { name: 'a symlinked file leading out of the mount', path: '/.well-known/leak.txt' },
+    {
+      name: 'a symlinked directory leading out of the mount',
+      path: '/.well-known/linked/secret.txt',
+    },
+  ];
+  for (const arm of hidden) {
+    for (const mount of [spa, clean]) {
+      it(`${mount.spa ? 'spa:true' : 'cleanUrls:true'} — ${arm.name} (${arm.path}) stays a 404`, async () => {
+        const res = await buildApp([mount], root).request(arm.path);
+        expect(res.status).toBe(404);
+        const body = await res.text();
+        expect(body).not.toContain(HIDDEN);
+        expect(body).not.toContain(OUTSIDE);
+        expect(body).not.toContain(SHELL);
+      });
+    }
+  }
+
+  it('the encoded spelling of the directory name is the same directory, with the same rules', async () => {
+    const app = buildApp([spa], root);
+    const served = await app.request('/%2ewell-known/security.txt');
+    expect(served.status).toBe(200);
+    expect(await served.text()).toBe(SECURITY_TXT);
+    const refused = await app.request('/%2ewell-known/%2esecret');
+    expect(refused.status).toBe(404);
+    expect(await refused.text()).not.toContain(HIDDEN);
+  });
+
+  it('a mount at another route does not serve .well-known below it', async () => {
+    const nonRoot: FrontendSpec = { route: '/site', dir: 'web/dist', spa: false, cleanUrls: false };
+    const app = buildApp([nonRoot], root);
+    expect((await app.request('/site/index.html')).status).toBe(200);
+    const res = await app.request('/site/.well-known/security.txt');
+    expect(res.status).toBe(404);
+    expect(await res.text()).not.toContain('Contact:');
+    // …and a root mount over a parent directory does not serve it from a subdirectory either.
+    expect((await buildApp([plain], root).request('/a/.well-known/x')).status).toBe(404);
+  });
+
+  it('spa:true — a miss under /.well-known/ is a 404, never the shell', async () => {
+    const app = buildApp([spa], root);
+    for (const path of [
+      '/.well-known/missing.txt',
+      '/.well-known/openid-configuration',
+      '/.well-known/acme-challenge/absent',
+      '/.well-known/acme-challenge',
+      '/.well-known',
+      '/.well-known/',
+      '/%2ewell-known/missing.txt',
+      // A malformed escape behind the encoded name: the router has decoded the name by the time
+      // the mount reads the path, so this is the same miss.
+      '/%2ewell-known/missing%',
+    ]) {
+      const res = await app.request(path);
+      expect(res.status, path).toBe(404);
+      expect(await res.text(), path).not.toContain(SHELL);
+    }
+    // The control: any other miss on the same mount still gets the shell.
+    const deepLink = await app.request('/dashboard');
+    expect(deepLink.status).toBe(200);
+    expect(await deepLink.text()).toContain(SHELL);
+  });
+
+  it('spa:true — a Range request for a miss under /.well-known/ is a 404, not a 416 sized from the shell', async () => {
+    const res = await buildApp([spa], root).request('/.well-known/missing.txt', {
+      headers: { Range: 'bytes=99999-' },
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it('the directory is never listed', async () => {
+    const res = await buildApp([plain], root).request('/.well-known/');
+    expect(res.status).toBe(404);
+    expect(await res.text()).not.toContain('security.txt');
+  });
+
+  it('cleanUrls:true — an extensionless path resolves to its .html page; a miss stays a 404', async () => {
+    for (const mount of [clean, cleanSpa]) {
+      const app = buildApp([mount], root);
+      const page = await app.request('/.well-known/change-password');
+      expect(page.status).toBe(200);
+      expect(page.headers.get('content-type')).toMatch(/text\/html/);
+      expect(await page.text()).toBe('<p>change</p>');
+      const miss = await app.request('/.well-known/absent');
+      expect(miss.status).toBe(404);
+      expect(await miss.text()).not.toContain(SHELL);
+    }
+    // Without the option the same request is a miss, as for any other extensionless path.
+    expect((await buildApp([plain], root).request('/.well-known/change-password')).status).toBe(
+      404,
+    );
+  });
+
+  it("a miss under /.well-known/ gets the mount's 404.html with status 404, on an spa:true mount too", async () => {
+    const withPage = mkdtempSync(join(tmpdir(), 'rayspec-well-known-404-'));
+    try {
+      const dir = join(withPage, 'web', 'dist');
+      mkdirSync(join(dir, '.well-known'), { recursive: true });
+      writeFileSync(join(dir, 'index.html'), SHELL, 'utf8');
+      writeFileSync(join(dir, '404.html'), NOT_FOUND_PAGE, 'utf8');
+      for (const mount of [plain, spa]) {
+        const res = await buildApp([mount], withPage).request('/.well-known/security.txt');
+        expect(res.status).toBe(404);
+        expect(await res.text()).toBe(NOT_FOUND_PAGE);
+      }
+    } finally {
+      rmSync(withPage, { recursive: true, force: true });
+    }
+  });
+
+  it('a link that stays inside the mount is followed to its target, a hidden one included, as on any other path', async () => {
+    // The symlink rule is containment only: it asks where a link ends, not what the target is
+    // called. `/.env` itself stays a 404; a link the site put beside its files names it anew.
+    const linked = mkdtempSync(join(tmpdir(), 'rayspec-well-known-inlink-'));
+    try {
+      const dir = join(linked, 'web', 'dist');
+      mkdirSync(join(dir, '.well-known'), { recursive: true });
+      writeFileSync(join(dir, 'index.html'), SHELL, 'utf8');
+      writeFileSync(join(dir, '.env'), HIDDEN, 'utf8');
+      symlinkSync(join(dir, '.env'), join(dir, 'alias.txt'));
+      symlinkSync(join(dir, '.env'), join(dir, '.well-known', 'alias.txt'));
+      const app = buildApp([plain], linked);
+      expect((await app.request('/.env')).status).toBe(404);
+      for (const path of ['/alias.txt', '/.well-known/alias.txt']) {
+        const res = await app.request(path);
+        expect(res.status, path).toBe(200);
+        expect(await res.text(), path).toBe(HIDDEN);
+      }
+    } finally {
+      rmSync(linked, { recursive: true, force: true });
+    }
+  });
+
+  it('a .well-known directory that is itself a symlink out of the mount is not served', async () => {
+    const linked = mkdtempSync(join(tmpdir(), 'rayspec-well-known-link-'));
+    try {
+      const dir = join(linked, 'web', 'dist');
+      const outside = join(linked, 'outside');
+      mkdirSync(dir, { recursive: true });
+      mkdirSync(outside, { recursive: true });
+      writeFileSync(join(dir, 'index.html'), SHELL, 'utf8');
+      writeFileSync(join(outside, 'security.txt'), OUTSIDE, 'utf8');
+      symlinkSync(outside, join(dir, '.well-known'));
+      const res = await buildApp([plain], linked).request('/.well-known/security.txt');
+      expect(res.status).toBe(404);
+      expect(await res.text()).not.toContain(OUTSIDE);
+    } finally {
+      rmSync(linked, { recursive: true, force: true });
     }
   });
 });

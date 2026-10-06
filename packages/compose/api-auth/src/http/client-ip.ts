@@ -9,8 +9,9 @@
  *     an EXPLICITLY-configured trusted-proxy CIDR list (the deployment's real LB/proxy hops). For XFF,
  *     the real client is found by walking right-to-left and skipping trusted hops — a client-forged
  *     left prefix can never win;
- *   - every address is NORMALIZED (IPv4-mapped-IPv6 unwrapped, brackets/port/zone stripped, lowercased)
- *     so one caller maps to one bucket key.
+ *   - every address is NORMALIZED (IPv4-mapped-IPv6 unwrapped in every spelling, brackets/port/zone
+ *     stripped, lowercased) so one caller maps to one bucket key, and so the trusted list gives one
+ *     answer for one peer.
  *
  * Trusted-proxies default to EMPTY, so out of the box no forwarding header is ever trusted (the peer
  * is the identity) — a deployment behind a proxy opts in by configuring its proxy CIDRs.
@@ -19,11 +20,9 @@
 import type { Context } from 'hono';
 import type { AppEnv } from '../app-context.js';
 
-/** Strip an IPv6 zone id, surrounding brackets, a trailing port, and the IPv4-mapped prefix; lowercase. */
-export function normalizeIp(raw: string | undefined | null): string | undefined {
-  if (raw === undefined || raw === null) return undefined;
+/** Strip surrounding brackets, a trailing port and an IPv6 zone id; trim and lowercase. */
+function bareAddress(raw: string): string {
   let ip = raw.trim();
-  if (ip === '') return undefined;
   // `[::1]` / `[::1]:443` → strip the brackets (and any :port after them).
   if (ip.startsWith('[')) {
     const close = ip.indexOf(']');
@@ -34,13 +33,7 @@ export function normalizeIp(raw: string | undefined | null): string | undefined 
   }
   const zone = ip.indexOf('%'); // IPv6 zone id, e.g. fe80::1%eth0
   if (zone !== -1) ip = ip.slice(0, zone);
-  ip = ip.toLowerCase();
-  // IPv4-mapped IPv6 (`::ffff:1.2.3.4`) → the plain IPv4 the mapping carries.
-  if (ip.startsWith('::ffff:')) {
-    const tail = ip.slice('::ffff:'.length);
-    if (tail.includes('.')) ip = tail;
-  }
-  return ip === '' ? undefined : ip;
+  return ip.toLowerCase();
 }
 
 /** Parse an IPv4 dotted-quad to a 32-bit unsigned int, or `undefined` if it is not a valid IPv4. */
@@ -57,10 +50,27 @@ function ipv4ToInt(ip: string): number | undefined {
   return acc >>> 0;
 }
 
-/** Parse an IPv6 address to a 128-bit BigInt, or `undefined` if it is not a valid IPv6. */
+/** The dotted-quad text of a 32-bit unsigned int. */
+function intToIpv4(value: number): string {
+  return [value >>> 24, (value >>> 16) & 0xff, (value >>> 8) & 0xff, value & 0xff].join('.');
+}
+
+/**
+ * Parse an IPv6 address to a 128-bit BigInt, or `undefined` if it is not a valid IPv6. Every
+ * spelling of one address gives one value: `::` in any position or none, leading zeros, and a
+ * dotted quad in place of the last two groups (`::ffff:10.1.2.3`, `64:ff9b::10.1.2.3`).
+ */
 function ipv6ToBigInt(ip: string): bigint | undefined {
   if (!ip.includes(':')) return undefined;
-  const halves = ip.split('::');
+  let text = ip;
+  // A dotted quad may stand for the LAST 32 bits only; rewrite it as the two groups it is.
+  if (text.includes('.')) {
+    const lastColon = text.lastIndexOf(':');
+    const quad = ipv4ToInt(text.slice(lastColon + 1));
+    if (quad === undefined) return undefined;
+    text = `${text.slice(0, lastColon + 1)}${(quad >>> 16).toString(16)}:${(quad & 0xffff).toString(16)}`;
+  }
+  const halves = text.split('::');
   if (halves.length > 2) return undefined;
   const head = halves[0] ? halves[0].split(':') : [];
   const tail = halves.length === 2 ? (halves[1] ? halves[1].split(':') : []) : null;
@@ -81,37 +91,135 @@ function ipv6ToBigInt(ip: string): bigint | undefined {
   return acc;
 }
 
-/** True if a normalized `ip` falls within `cidr` (`addr/prefix`, or a bare address = full length). */
-export function ipInCidr(ip: string, cidr: string): boolean {
-  const slash = cidr.indexOf('/');
-  const network = normalizeIp(slash === -1 ? cidr : cidr.slice(0, slash));
-  if (network === undefined) return false;
-  const prefixText = slash === -1 ? undefined : cidr.slice(slash + 1);
+/** The length of the prefix an IPv4-mapped IPv6 address puts in front of its IPv4 address. */
+const MAPPED_PREFIX_BITS = 96;
 
-  const ip4 = ipv4ToInt(ip);
-  const net4 = ipv4ToInt(network);
-  if (ip4 !== undefined && net4 !== undefined) {
-    const prefix = prefixText === undefined ? 32 : Number(prefixText);
-    if (!Number.isInteger(prefix) || prefix < 0 || prefix > 32) return false;
-    if (prefix === 0) return true;
-    const mask = prefix === 32 ? 0xffffffff : (0xffffffff << (32 - prefix)) >>> 0;
-    return (ip4 & mask) === (net4 & mask);
-  }
-
-  const ip6 = ipv6ToBigInt(ip);
-  const net6 = ipv6ToBigInt(network);
-  if (ip6 !== undefined && net6 !== undefined) {
-    const prefix = prefixText === undefined ? 128 : Number(prefixText);
-    if (!Number.isInteger(prefix) || prefix < 0 || prefix > 128) return false;
-    if (prefix === 0) return true;
-    const mask = ((1n << 128n) - 1n) ^ ((1n << BigInt(128 - prefix)) - 1n);
-    return (ip6 & mask) === (net6 & mask);
-  }
-
-  return false; // different families (or unparseable) never match
+/**
+ * The IPv4 address an IPv4-mapped IPv6 address (`::ffff:0:0/96`, RFC 4291) carries, or
+ * `undefined` when `value` is outside that block.
+ */
+function mappedIpv4(value: bigint): number | undefined {
+  return value >> 32n === 0xffffn ? Number(value & 0xffffffffn) : undefined;
 }
 
-/** True if a normalized `ip` is inside any configured trusted-proxy CIDR. */
+/**
+ * Strip an IPv6 zone id, surrounding brackets and a trailing port, lowercase, and replace an
+ * IPv4-mapped IPv6 address by the IPv4 address it carries.
+ *
+ * The mapped block is recognised by VALUE, not by spelling: `::ffff:10.1.2.3`, `::ffff:a01:203`,
+ * `::FFFF:0A01:0203` and `0:0:0:0:0:ffff:a01:203` are one address and all become `10.1.2.3`. Matching
+ * on the dotted spelling alone left the others IPv6, where a trusted IPv6 range decided about them
+ * and the IPv4 ranges did not — two answers for one peer, depending on how its address was written.
+ * Any other address is returned as it was written (lowercased), not rewritten to a canonical form.
+ */
+export function normalizeIp(raw: string | undefined | null): string | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  const ip = bareAddress(raw);
+  if (ip === '') return undefined;
+  const v6 = ipv6ToBigInt(ip);
+  const mapped = v6 === undefined ? undefined : mappedIpv4(v6);
+  return mapped === undefined ? ip : intToIpv4(mapped);
+}
+
+/** A CIDR prefix length: decimal digits only, so an empty or malformed one is no prefix at all. */
+function prefixLength(text: string | undefined, bits: number): number | undefined {
+  if (text === undefined) return bits; // a bare address is a full-length prefix
+  if (!/^\d{1,3}$/.test(text)) return undefined;
+  const prefix = Number(text);
+  return prefix <= bits ? prefix : undefined;
+}
+
+/** One entry of the trusted-proxy list, read as the range of one address family. */
+type CidrRange =
+  | { readonly family: 4; readonly network: number; readonly prefix: number }
+  | { readonly family: 6; readonly network: bigint; readonly prefix: number };
+
+/**
+ * Read `cidr` (`addr/prefix`, or a bare address = full length) as the range it names, or
+ * `undefined` when it names none: an address that does not parse, or a prefix length that is
+ * missing, malformed or wider than the notation it is written in.
+ *
+ * A network inside the IPv4-mapped block `::ffff:0:0/96` is an IPV4 range in two notations:
+ *
+ *   - with an IPv6-length prefix of 96 or more, the mapped spelling of the range
+ *     (`::ffff:10.0.0.0/104`, `::ffff:a00:0/104`, `::ffff:0:0/96` are `10.0.0.0/8` and `0.0.0.0/0`);
+ *   - with a DOTTED network and a prefix of 32 or less, the IPv4 range with the mapped prefix in
+ *     front of its address (`::ffff:10.0.0.0/8` is `10.0.0.0/8`). The prefix counts IPv4 bits there,
+ *     as it does in the address it is written behind; reading it as the IPv6 range `::/8` would
+ *     trust `::1` and no IPv4 proxy.
+ *
+ * A dotted network with a prefix between the two (33 to 95) fits neither notation and names no
+ * range. A network written in hex groups with a prefix below 96 is the IPv6 range it says, wider
+ * than the mapped block.
+ */
+function parseCidr(cidr: string): CidrRange | undefined {
+  const slash = cidr.indexOf('/');
+  const network = bareAddress(slash === -1 ? cidr : cidr.slice(0, slash));
+  const prefixText = slash === -1 ? undefined : cidr.slice(slash + 1).trim();
+
+  const net4 = ipv4ToInt(network);
+  if (net4 !== undefined) {
+    const prefix = prefixLength(prefixText, 32);
+    return prefix === undefined ? undefined : { family: 4, network: net4, prefix };
+  }
+
+  const net6 = ipv6ToBigInt(network);
+  if (net6 === undefined) return undefined;
+  const prefix = prefixLength(prefixText, 128);
+  if (prefix === undefined) return undefined;
+  const mapped = mappedIpv4(net6);
+  if (mapped !== undefined) {
+    if (prefix >= MAPPED_PREFIX_BITS) {
+      return { family: 4, network: mapped, prefix: prefix - MAPPED_PREFIX_BITS };
+    }
+    if (network.includes('.')) {
+      return prefix <= 32 ? { family: 4, network: mapped, prefix } : undefined;
+    }
+  }
+  return { family: 6, network: net6, prefix };
+}
+
+/**
+ * True if `entry` names a range a peer can be inside. The boot uses it to refuse a
+ * `RAYSPEC_TRUSTED_PROXIES` entry that could never match, instead of running with a proxy that is
+ * silently not trusted.
+ */
+export function isTrustedProxyRange(entry: string): boolean {
+  return parseCidr(entry) !== undefined;
+}
+
+/**
+ * True if `ip` falls within `cidr` (`addr/prefix`, or a bare address = full length). The address is
+ * normalized, so the answer does not depend on how it is spelled.
+ *
+ * IPv4-mapped addresses are IPv4 on both sides. An address in `::ffff:0:0/96` is compared as the
+ * IPv4 address it carries, and a range written inside that block is the IPv4 range it carries (see
+ * {@link parseCidr} for the two notations). An IPv6 range that is WIDER than the block (`::/8`,
+ * `::/0`) does not reach into it: it matches IPv6 addresses only, the same way an IPv6 range never
+ * matched a plain IPv4 address. Trusting IPv4 peers therefore always takes a range that names them.
+ */
+export function ipInCidr(ip: string, cidr: string): boolean {
+  const address = normalizeIp(ip);
+  if (address === undefined) return false;
+  const range = parseCidr(cidr);
+  if (range === undefined) return false;
+
+  if (range.family === 4) {
+    const ip4 = ipv4ToInt(address);
+    if (ip4 === undefined) return false; // different families never match
+    if (range.prefix === 0) return true;
+    const mask = range.prefix === 32 ? 0xffffffff : (0xffffffff << (32 - range.prefix)) >>> 0;
+    return (ip4 & mask) === (range.network & mask);
+  }
+
+  const ip6 = ipv6ToBigInt(address);
+  if (ip6 === undefined) return false; // different families (or unparseable) never match
+  if (range.prefix === 0) return true;
+  const mask = ((1n << 128n) - 1n) ^ ((1n << BigInt(128 - range.prefix)) - 1n);
+  return (ip6 & mask) === (range.network & mask);
+}
+
+/** True if `ip` is inside any configured trusted-proxy CIDR. */
 function isTrustedProxy(ip: string, trustedProxies: readonly string[]): boolean {
   return trustedProxies.some((cidr) => ipInCidr(ip, cidr));
 }

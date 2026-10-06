@@ -21,8 +21,20 @@ environment is in [Runtime operations](./runtime-operations.md).
 - **The RaySpec CLI of the release the bundle pins.** A bundle names one exact runtime version
   (`runtime.version` in its manifest); a different CLI refuses it with `RAY_RUNTIME_UNSUPPORTED`.
   Install that release (`npm install -g rayspec@<version>`), run it with `npx rayspec@<version>`, or
-  run the release's linux/amd64 [runtime image](./runtime-image.md) by the digest its signed release
-  manifest names.
+  run the release's linux/amd64 [runtime image](./runtime-image.md). The image is not in a registry:
+  you build it from the tarballs the release attaches
+  ([Getting the image](./runtime-image.md#getting-the-image)). The release manifest attached to the
+  release is not signed and the npm packages carry no provenance attestation, so both show what the
+  release build recorded, not who published it.
+- **ffmpeg and ffprobe, for an application that records audio.** A bundle that requires
+  `audio_input` or `media_playback` stitches its recordings with them; without them the deployment
+  starts and serves, and no recording is transcribed or playable. The runtime image carries both
+  from 1.9.1; an image built from the 1.9.0 tag has neither
+  ([what to do on 1.9.0](./runtime-image.md#an-image-of-190-has-no-ffmpeg)). On any other host
+  install ffmpeg (it brings ffprobe) or name the executables with `RAYSPEC_FFMPEG_BIN` and
+  `RAYSPEC_FFPROBE_BIN`. From 1.9.1, `rayspec bundle verify` and the dry-run below write a line
+  starting with `warning: media tools missing` to stderr when such a bundle meets a host without
+  them; the 1.9.0 CLI writes no such line.
   You do not need the application's source tree: the bundle carries everything the application
   runs, and the runtime provides the `@rayspec/*` packages.
 - **A PostgreSQL database** for the deployment, and a server where a throwaway database may be

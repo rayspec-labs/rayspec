@@ -83,6 +83,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [fixtures for the fake speech-to-text adapter](docs/spec-reference.md#fixtures-for-the-fake-speech-to-text-adapter)
   and [standing in for a configured backend](docs/spec-reference.md#standing-in-for-a-configured-backend).
 
+- **A warning when a bundle needs ffmpeg and the host has none.** `rayspec bundle verify` and
+  `rayspec deploy <file.ray> --dry-run` write one line starting with
+  `warning: media tools missing` to stderr when the bundle requires `audio_input` or
+  `media_playback` and `ffmpeg` or `ffprobe` is not found on the host: as a file the user may
+  execute in a directory of `PATH`, or at the path `RAYSPEC_FFMPEG_BIN` / `RAYSPEC_FFPROBE_BIN`
+  names. The line is written with and without `--json`; the dry-run writes it as soon as the bundle
+  is read, whatever the plan then says. Nothing is started to find out, so a tool that is present
+  but broken is not noticed. **The result envelope, its `warnings`, the verdict, the plan and the
+  exit code are unchanged**: the envelope's warning codes are the closed list of the bundle
+  contract, which has no code for a host tool, so this is a line on stderr and not an entry of
+  `warnings`. A deploy without `--dry-run` behaves as before: it serves, and stitching a recording
+  fails closed. A bundle that requires neither capability never gets the line.
+
 ### Fixed
 
 - **An audio session is marked `completed` once all its tracks are sealed.** The audio capability
@@ -140,6 +153,104 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the tool step, each model step's tokens and registry cost, the billed cost and the header's
   roll-up; the in-request cost test now holds the token columns too.
 
+- **The runtime image can run a product that records audio: it carries ffmpeg and ffprobe.** The
+  image installed Node, the published packages and the PostgreSQL client tools, and no ffmpeg. The
+  audio capability stitches a recording's Ogg-Opus chunks with ffmpeg and checks the result with
+  ffprobe, before transcription and to make the recording playable, and fails closed without them,
+  so a product that declares `audio_input` or `media_playback` deployed on the image and then
+  transcribed and played nothing. The one image now installs Debian's `ffmpeg` package, which
+  carries both tools: at a pinned version (`FFMPEG_VERSION` in
+  `deployments/runtime-image/Dockerfile`), from the Debian archive as it stood at a pinned moment
+  (`DEBIAN_SNAPSHOT`, served by snapshot.debian.org), without recommended packages, with the package
+  lists, logs and caches of the install removed. There is no second image without it. The build
+  runs both tools, requires the concat demuxer and the Ogg-Opus muxer, and stitches two generated
+  chunks the way the capability does, so a build without a working ffmpeg fails;
+  `scripts/image-conformance.mjs` requires both tools at the pinned version and runs the image's own
+  `@rayspec/audio-runtime` on two chunks as the image's user, and requires it to refuse a chunk
+  that is not Ogg and one ffmpeg cannot read. **The image is larger:** ffmpeg
+  brings 206 Debian packages with it, and an image built from the 1.9.0 tarballs grew from 1.30 GB
+  to 1.75 GB unpacked and from 402 MB to 572 MB as an archive. The build now also needs
+  snapshot.debian.org.
+- **The image SBOM lists the image's Debian packages.** `image-sbom.cdx.json` listed the npm
+  packages under `/opt/rayspec` and left out the Debian userland. `scripts/gen-image-sbom.mjs` now
+  also reads the image's dpkg record (`/var/lib/dpkg/status`) and lists every installed Debian
+  package as `pkg:deb/debian/<name>@<version>?arch=<arch>&distro=debian-<release>`, name and
+  version percent-encoded as a package URL writes them (`libstdc%2B%2B6`); the component's `name`
+  is the one dpkg records. Listed are the base image's userland, ffmpeg and everything ffmpeg
+  depends on. It refuses an image without a dpkg
+  record, and one whose record names no installed `ffmpeg`. A Debian package carries no digest and
+  no licence in the SBOM, since dpkg records neither; Node and the PostgreSQL client tools are still
+  not listed. No step scans the Debian packages for advisories.
+- **The documentation no longer describes a runtime image on GHCR listed in a signed release
+  manifest.** 1.9.0 was published from a maintainer's machine with npm, not by the release workflow:
+  its npm packages carry no provenance attestation, the release manifest attached to its GitHub
+  release is unsigned, and its runtime image was built and tested by the release build and pushed
+  nowhere. `docs/runtime-image.md` and `docs/self-hosted-deployment.md` told operators to pull
+  `ghcr.io/rayspec-labs/rayspec` by the digest of a signed manifest, which does not exist. They now
+  say how to get the image (build it from the tarballs the release attaches, with the two
+  `docker buildx build` commands given there), what the unsigned manifest shows and does not show,
+  why the digest it names cannot be pulled or reproduced, and that the image carries ffmpeg and
+  why. Both pages date ffmpeg, the build's checks of it, the Debian entries of the image SBOM and
+  the `media tools missing` warning from 1.9.1, and `docs/runtime-image.md` says what a 1.9.0
+  deployer with an audio product does instead: move to 1.9.1, or install ffmpeg in an image built
+  on their own 1.9.0 image. `docs/releasing.md` states how 1.9.0 and 1.9.1 are published and what such a release
+  carries, and its "Verifying a release" leads with the commands that fit such a release (the
+  manifest against the tarballs, the identity manifest, `npm view`), from a built checkout of the
+  tag; the signature and the image archive follow as what a workflow-published release adds.
+- **`scripts/publish.mjs` can publish from a terminal with a browser-based second factor.** The
+  script ran the publish with piped input and output. An npm account whose two-factor
+  authentication is a passkey or a security key gets an authentication URL from npm, which then
+  waits on the terminal for the approval; behind a pipe npm cannot wait, so the first package failed
+  with `EOTP` and nothing was published. 1.9.0 was therefore published by hand, one tarball after
+  the other. A `--publish` now runs every publish call attached to the terminal the script was
+  started from, and `--otp <code>` hands a one-time code to every call for an account with an
+  authenticator app (refused outside `--publish`). npm waits for a browser approval only while
+  both its input and its output are a terminal, so the script's output must not be piped either
+  (`| tee publish.log` is enough to fail with `EOTP`); a failed publish that ran without a
+  terminal on either side says so. With `--from <dir>` each tarball goes to
+  `npm publish <tarball>` as it is (before: `pnpm publish <tarball>`, which runs the same npm
+  command), and every publish and dry run carries `--access public`, so a scoped package that is
+  new in a release is created public instead of being refused as a restricted one. A publish call
+  that fails no longer ends in a stack trace: the run restores the manifests, names the package
+  and the packages it published before it, says that the same command continues (after a `--from`
+  run) or that the run cannot be continued (when it packed its own bytes), and exits 1; the
+  `--json` summary carries `failed`, the name of that package or `null`. The reason it prints is
+  npm's exit code, or the signal that ended npm; it never repeats the publish command line, which
+  carries the one-time code. A failed dry run names
+  its package the same way. Continuing is unchanged: a package npm already serves with the
+  integrity of its tarball is skipped, and one it serves with other bytes stops the run before
+  the first publish. The two opt-ins of a real publish (`--yes-really-publish` and
+  `RAYSPEC_ALLOW_PUBLISH=1`), the tag check and every other refusal are unchanged, and the release
+  workflow's publish step runs the same command as before.
+- **`docs/releasing.md` describes publishing from the owner's machine as a supported path.** It was
+  a note that 1.9.0 had been published that way. The runbook now gives the path step by step
+  beside the workflow path: the build pass of the release workflow, downloading its artifacts,
+  verifying them against the release manifest and the identity manifest, publishing the tarballs
+  with `scripts/publish.mjs --publish --from`, checking npm against the manifest, and creating the
+  GitHub release. It says what that path does not produce (npm provenance, a signed manifest, an
+  image in a registry, the evidence document and the managed receipt), and how the approver adds
+  the signature and pushes the tested image archive afterwards.
+- **A static mount at `route: /` serves its `/.well-known/` directory.** The static handler refused
+  every request path with a segment that begins with a dot, so `/.well-known/security.txt`
+  (RFC 9116), `assetlinks.json`, `apple-app-site-association` and every other well-known file
+  answered `404` although the file was in the mounted directory. A mount at the root now serves
+  the top-level `.well-known` directory of its `dir`. Everything else stays hidden: only the exact,
+  case-sensitive first segment `.well-known` is let through, no segment below it may begin with a
+  dot, and a mount at any other route serves no dot path, so `/.env`, `/.git/config`,
+  `/.well-known/.secret` and `/a/.well-known/x` answer `404` as before. The traversal and
+  symlink-escape checks are unchanged and apply to these paths, and the directory is not listed.
+  The symlink check is containment only, here as on every other path: a link inside `dir` whose
+  target is a hidden file of the same `dir` serves that file under the link's name, so a link in
+  `.well-known` can name one too. Files are typed by extension (`security.txt` as `text/plain`, a `.json` file as
+  `application/json`), and `apple-app-site-association`, which has none, is served as
+  `application/json`. `cleanUrls` and the root `404.html` apply as to any other path; a path under
+  `/.well-known/` that names no file is a `404` on an `spa: true` mount too and never the
+  `index.html` fallback. The boot's inline-asset scan reads the HTML files of that directory, since
+  they are now served. `rayspec pack` already carried the directory in a bundle; a test now holds
+  that. **What changes for an existing deployment:** files a build already placed in
+  `<dir>/.well-known/` of a root mount become reachable; look at what is in that directory before
+  upgrading.
+
 ### Security
 
 - **`@modelcontextprotocol/sdk` moves to `1.31.0`, the first version outside GHSA-6qxp-vccf-f47h.**
@@ -148,6 +259,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same version, and the lockfile, the dependency inventory and the closure SBOM are regenerated.
   RaySpec uses the SDK's `mcp.js` and `streamableHttp.js` only, for the in-process tool server an
   agent backend talks to.
+- **The exceptions for the advisories inside the Pi SDK's shrinkwrap are renewed until
+  2026-12-06; all 22 still apply.** `@rayspec/adapter-pi` depends on
+  `@earendil-works/pi-coding-agent` `0.79.9`, whose `npm-shrinkwrap.json` pins `undici` `8.5.0`
+  (15 advisories), `brace-expansion` `5.0.6` (6) and `protobufjs` `7.6.4` (1) for every consumer;
+  no override reaches them. The exceptions in `osv-scanner.consumer.toml` were set to expire on
+  2026-10-31.
+  Every release of the SDK from `0.79.9` to `1.0.4`, the newest, was checked on 2026-10-06 against
+  the registry and OSV.dev: `0.79.10` to `0.80.10` pin the same three copies; `0.86.0` to `1.0.0`
+  pin `undici` `8.10.2` and `protobufjs` `7.6.6`, which carry no advisory, and `brace-expansion`
+  `5.0.9`, which still carries three; `1.0.1` to `1.0.4` ship no shrinkwrap and depend on `undici`
+  `8.10.2` and `brace-expansion` `5.0.12`, which carry none. So a patched SDK exists, and the
+  adapter cannot take it unchanged: since `0.80.8` the SDK no longer exports `AuthStorage` and
+  takes credentials and models through an asynchronous `modelRuntime` option, and the adapter's
+  recorded fixtures are bound to the SDK version. The adapter stays at `0.79.9` in this release and
+  a consumer install still carries the 22 advisories; the move to the `1.x` SDK is its own change.
+  No exception was added or widened. The same file governs the scan of the runtime image's
+  lockfile in the candidate workflow, which installs the same copies.
 - **The workspace lockfile is clear of the advisories published against `proxy-addr` and
   `source-map-js`.** The root overrides pin `proxy-addr` `2.0.8` (GHSA-jqcg-44mw-7w3h) and
   `source-map-js` `1.2.2` (GHSA-68fv-2mgg-jv7q), the first fixed versions, and the lockfile, the
@@ -159,6 +287,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   test tooling (`vitest`, `vite`, `postcss`) and is not part of what a consumer installs. A
   fresh consumer install of the published packages already resolves `proxy-addr` `2.0.8`, because
   `express` declares `^2.0.7`; the consumer scan reports nothing new.
+- **The audio capability hands ffmpeg only Ogg chunks, and refuses a recording ffmpeg stitched
+  around a chunk.** `remuxChunks` of `@rayspec/audio-runtime` wrote every uploaded chunk to a file
+  and ran ffmpeg's concat demuxer over them with no check of what a chunk was, so ffmpeg chose a
+  demuxer from the bytes. A chunk of plain text behind a good one made ffmpeg log `Impossible to
+  open`, end the stream there and exit 0, and the result, the recording up to that chunk, passed
+  both structural checks and was transcribed and played as the whole recording. A chunk that was
+  an `ffconcat` script was followed (four chunks' length from two uploads), and a chunk in another
+  container was handed to that container's demuxer. Now a chunk that does not begin with the Ogg
+  capture pattern (`OggS`) is refused before anything is written or run; ffmpeg runs with
+  `-format_whitelist concat,ogg -protocol_whitelist file`, so it uses those two demuxers and the
+  file protocol only, and with `-xerror`, so an error ends the run; and a run in which the concat
+  demuxer reports a chunk it could not open is refused whatever ffmpeg's exit code (a chunk cut
+  off inside its headers is skipped with exit 0 even under `-xerror`). Each refusal is a
+  `RemuxError`, which the transcription and playback steps already treat as a failed recording.
+  **What changes:** a recording with a chunk that is not Ogg, or that ffmpeg cannot read, now
+  fails where it was silently shortened; a recording of intact Ogg-Opus chunks is stitched as
+  before. The image build's stitch check uses the same command line.
+  [The runtime image](./docs/runtime-image.md#ffmpeg-and-ffprobe) and the
+  [threat model](./docs/threat-model.md) now state what ffmpeg is given, as which user, under
+  which limits (a time limit; no memory, CPU or concurrency limit and no sandbox), and that an
+  ffmpeg security fix reaches an image only when its pinned version is moved.
+- **A trusted-proxy range gives one answer for one address, however the address is spelled.** An
+  IPv4-mapped IPv6 address was replaced by its IPv4 address only in the dotted spelling
+  (`::ffff:10.1.2.3`). The hex spelling of the same address (`::ffff:a01:203`, also in uppercase,
+  with leading zeros or fully expanded) stayed IPv6: it was compared against the IPv6 entries of
+  `RAYSPEC_TRUSTED_PROXIES`, so a broad entry such as `::/8` made an IPv4 peer a trusted proxy
+  whose `X-Forwarded-For` was believed, and the IPv4 entries did not apply to it. The mapped block
+  `::ffff:0:0/96` is now recognised by value: every spelling becomes the IPv4 address it carries
+  before anything is matched, on the peer, on each `X-Forwarded-For` hop and on `X-Real-IP`. On the
+  list side, an entry written inside the mapped block is the IPv4 range it carries
+  (`::ffff:10.0.0.0/104` and `::ffff:10.0.0.0/8` are `10.0.0.0/8`, `::ffff:0:0/96` is every IPv4
+  address), and an IPv6 entry
+  wider than the block (`::/8`, `::/0`) covers IPv6 peers only, as it always did for the dotted
+  spelling. A Node socket reports a mapped peer in the dotted spelling, so the peer check of a
+  running deployment was already the IPv4 one; the hex spelling reaches the runtime in a
+  forwarding header. **What changes:** the client address the runtime derives is the IPv4 address
+  for every spelling, so the rate-limit bucket, the address stored with a session and the address
+  hash in the audit log are the same for `::ffff:a01:203` as for `10.1.2.3`, where the hex spelling
+  had its own before. An entry inside the mapped block with an IPv6-length prefix (`/96` to `/128`)
+  matched no dotted peer before and matches its IPv4 range now; review a list that carries one,
+  `::ffff:0:0/96` in particular. An entry written as a dotted mapped address with an IPv4-length
+  prefix (`::ffff:10.0.0.0/8`, `::ffff:10.1.2.3/32`) keeps the meaning it had: the IPv4 range
+  behind the mapped prefix, here `10.0.0.0/8` and `10.1.2.3/32`. A dotted mapped address with a
+  prefix between the two notations (`/33` to `/95`) names no range, as before. An entry that names
+  no range now refuses the boot and the message names it: an address that does not parse, or a
+  missing or malformed prefix length (`10.0.0.0/`, `10.0.0.0/8.0`, `10.0.0.0/33`). Before, an
+  empty prefix was read as `/0` and trusted every address of the family, `/8.0` was read as `/8`,
+  and an entry that could match nothing was accepted without a word, which left the proxy
+  untrusted and every client behind it in one rate-limit bucket. An IPv6 address with a dotted
+  tail outside the mapped block (`64:ff9b::10.1.2.3`) is parsed and matches IPv6 entries, where it
+  matched none. No other IPv6 address is rewritten.
 
 ## [1.9.0] - 2026-10-05
 

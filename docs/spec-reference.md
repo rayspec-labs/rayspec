@@ -2087,6 +2087,28 @@ returns the platform's uniform `404`. Serving is fail-closed — path traversal
 (including URL-encoded forms), dotfiles/hidden paths, and symlinks that escape the
 directory are refused; directories are never listed.
 
+**`/.well-known/`.** One dot path is served: the top-level `.well-known` directory of a
+mount at `route: /` ([RFC 8615](https://www.rfc-editor.org/rfc/rfc8615)), so a site can
+ship `/.well-known/security.txt` ([RFC 9116](https://www.rfc-editor.org/rfc/rfc9116)),
+`assetlinks.json`, `apple-app-site-association` or a `change-password` page by putting the
+file in `<dir>/.well-known/`. The first path segment must be exactly `.well-known`
+(case-sensitive) and no segment below it may begin with a dot, so `/.env`, `/.git/config`,
+`/.well-known/.secret` and `/a/.well-known/x` stay `404`; a mount at any other route
+serves no dot path at all, since a well-known URI exists only at the root of the origin.
+Traversal and symlink checks apply unchanged, and the directory is not listed. The symlink
+check, here as on every other path of a mount, asks only whether a link ends inside `dir`:
+a link in `.well-known` (or anywhere else in `dir`) whose target is a hidden file of the
+same `dir`, such as `alias.txt -> ../.env`, serves that file under the link's name. Keep
+files that must not be served out of `dir` rather than behind a dot name. Files are
+typed by their extension (`security.txt` is `text/plain`, a `.json` file
+`application/json`); `apple-app-site-association`, which has none, is served as
+`application/json`, and any other file without an extension as
+`application/octet-stream`. `cleanUrls` and the root `404.html` apply as to any other
+path. `spa` does not: a path under `/.well-known/` that names no file answers `404` on an
+`spa: true` mount too, never the `index.html` fallback, because a client that asks for
+one of these paths takes a `200` for the document. `rayspec pack` carries the directory
+in the bundle like the rest of `dir`.
+
 **Response security headers — put CSS and JS in files, not inline.** Every response a
 mount serves carries `Content-Security-Policy` and `Permissions-Policy`, on **both** boot
 shapes: a static profile emits them app-wide, and a full-backend boot stamps them on the
