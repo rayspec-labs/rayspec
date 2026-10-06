@@ -190,7 +190,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   say how to get the image (build it from the tarballs the release attaches, with the two
   `docker buildx build` commands given there), what the unsigned manifest shows and does not show,
   why the digest it names cannot be pulled or reproduced, and that the image carries ffmpeg and
-  why. `docs/releasing.md` states how 1.9.0 and 1.9.1 are published and what such a release
+  why. Both pages date ffmpeg, the build's checks of it, the Debian entries of the image SBOM and
+  the `media tools missing` warning from 1.9.1, and `docs/runtime-image.md` says what a 1.9.0
+  deployer with an audio product does instead: move to 1.9.1, or install ffmpeg in an image built
+  on their own 1.9.0 image. `docs/releasing.md` states how 1.9.0 and 1.9.1 are published and what such a release
   carries, and its "Verifying a release" leads with the commands that fit such a release (the
   manifest against the tarballs, the identity manifest, `npm view`), from a built checkout of the
   tag; the signature and the image archive follow as what a workflow-published release adds.

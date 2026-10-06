@@ -146,6 +146,14 @@ describe('ipInCidr', () => {
     expect(ipInCidr('2001:db8::1', '::ffff:0:0/96')).toBe(false);
   });
 
+  it('a mapped network in hex groups with a prefix below 96 is the IPv6 range it says', () => {
+    // The hex twin of `::ffff:10.0.0.0/8` is `::/8`: it trusts IPv6 peers and no IPv4 proxy.
+    expect(ipInCidr('::1', '::ffff:a00:0/8')).toBe(true);
+    for (const spelling of MAPPED_SPELLINGS) {
+      expect(ipInCidr(spelling, '::ffff:a00:0/8'), spelling).toBe(false);
+    }
+  });
+
   it('a dotted mapped network with an IPv4-length prefix is the IPv4 range behind the prefix', () => {
     // The prefix counts IPv4 bits, as in the address it is written behind: never the IPv6 `::/8`.
     for (const spelling of MAPPED_SPELLINGS) {

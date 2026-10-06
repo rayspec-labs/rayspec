@@ -28,11 +28,13 @@ environment is in [Runtime operations](./runtime-operations.md).
   release build recorded, not who published it.
 - **ffmpeg and ffprobe, for an application that records audio.** A bundle that requires
   `audio_input` or `media_playback` stitches its recordings with them; without them the deployment
-  starts and serves, and no recording is transcribed or playable. The runtime image carries both.
-  On any other host install ffmpeg (it brings ffprobe) or name the executables with
-  `RAYSPEC_FFMPEG_BIN` and `RAYSPEC_FFPROBE_BIN`. `rayspec bundle verify` and the dry-run below
-  write a line starting with `warning: media tools missing` to stderr when such a bundle meets a
-  host without them.
+  starts and serves, and no recording is transcribed or playable. The runtime image carries both
+  from 1.9.1; an image built from the 1.9.0 tag has neither
+  ([what to do on 1.9.0](./runtime-image.md#an-image-of-190-has-no-ffmpeg)). On any other host
+  install ffmpeg (it brings ffprobe) or name the executables with `RAYSPEC_FFMPEG_BIN` and
+  `RAYSPEC_FFPROBE_BIN`. From 1.9.1, `rayspec bundle verify` and the dry-run below write a line
+  starting with `warning: media tools missing` to stderr when such a bundle meets a host without
+  them; the 1.9.0 CLI writes no such line.
   You do not need the application's source tree: the bundle carries everything the application
   runs, and the runtime provides the `@rayspec/*` packages.
 - **A PostgreSQL database** for the deployment, and a server where a throwaway database may be

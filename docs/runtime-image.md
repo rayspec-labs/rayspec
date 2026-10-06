@@ -3,7 +3,8 @@
 Each release defines a linux/amd64 container image of the RaySpec runtime
 (`deployments/runtime-image/Dockerfile`). It holds Node at the release's pinned 22 patch, the
 published npm packages installed from the release tarballs, the PostgreSQL 16 client tools that
-`rayspec export` and `rayspec import` run, and ffmpeg with ffprobe for products that record audio.
+`rayspec export` and `rayspec import` run, and, from 1.9.1, ffmpeg with ffprobe for products that
+record audio ([an image of 1.9.0 has neither](#an-image-of-190-has-no-ffmpeg)).
 Its entrypoint is `rayspec`, so every command of the [CLI reference](./cli-reference.md) runs as
 `docker run <image> <command> ...`; `rayspec-serve` is on `PATH` as well.
 
@@ -34,11 +35,11 @@ docker buildx build --builder rayspec-image --platform linux/amd64 --provenance=
 docker load -i ./rayspec-runtime.oci.tar
 ```
 
-The build refuses when the `rayspec` package among the tarballs is not `<version>`, when ffmpeg or
-ffprobe does not run, and when ffmpeg cannot stitch two Ogg-Opus chunks into one stream. It needs
-the npm registry (for the third-party packages), Docker Hub (for the two base images, pinned by
-digest) and snapshot.debian.org (for ffmpeg), and several gigabytes of free disk: the build cache,
-the archive and the loaded image together take about 10 GB. The examples below call the result `rayspec:<version>`;
+The build refuses when the `rayspec` package among the tarballs is not `<version>` and, from
+1.9.1, when ffmpeg or ffprobe does not run or ffmpeg cannot stitch two Ogg-Opus chunks into one
+stream. It needs the npm registry (for the third-party packages), Docker Hub (for the two base
+images, pinned by digest) and, from 1.9.1, snapshot.debian.org (for ffmpeg), and several gigabytes
+of free disk: the build cache, the archive and the loaded image together take about 10 GB. The examples below call the result `rayspec:<version>`;
 push it to a registry of your own if your hosts pull images, and refer to it there by the digest
 that registry reports.
 
@@ -58,8 +59,8 @@ under `images[0]` the platform, the Node version and the digest of the image the
   third-party npm packages are resolved from the registry when the lockfile of step 1 is written, so
   two builds differ. Do not look for that digest in a registry and do not expect to reproduce it.
   What you can check about your own image is its content: `node scripts/gen-image-sbom.mjs
-  --image-oci ./rayspec-runtime.oci.tar --out image-sbom.cdx.json` lists every npm and Debian
-  package in it, each `@rayspec` package with the SHA-512 of the tarball it was installed from, which
+  --image-oci ./rayspec-runtime.oci.tar --out image-sbom.cdx.json` lists every npm package in it and, from 1.9.1,
+  every Debian package, each `@rayspec` package with the SHA-512 of the tarball it was installed from, which
   is the integrity the manifest lists.
 
 ## What the image is
@@ -70,14 +71,14 @@ under `images[0]` the platform, the Node version and the digest of the image the
 | Base | `node:<pinned 22 patch>-trixie-slim`, pinned by digest in `deployments/runtime-image/Dockerfile` |
 | User | `rayspec` (uid and gid 10001). The image never runs as root. |
 | Installation | `/opt/rayspec`, owned by root and not writable by any other user, installed from the release tarballs with `npm ci` from the lockfile the build's first step wrote, kept in the image as `/opt/rayspec/package-lock.json`, install scripts disabled |
-| SBOM | `scripts/gen-image-sbom.mjs` writes `image-sbom.cdx.json` from the image archive: every npm package installed under `/opt/rayspec` and every Debian package of the image's dpkg record (the base userland, ffmpeg and what ffmpeg depends on), with the image's digest |
+| SBOM | `scripts/gen-image-sbom.mjs` writes `image-sbom.cdx.json` from the image archive: every npm package installed under `/opt/rayspec` and from 1.9.1, every Debian package of the image's dpkg record (the base userland, ffmpeg and what ffmpeg depends on), with the image's digest |
 | Working directory | `/var/lib/rayspec`, owned by `rayspec`, mode 0700: put the state directory and the blob root here, on a volume |
 | Listening | port 8080 (`PORT`), on every address of the container (`RAYSPEC_HOST=0.0.0.0`); `docker run -p` decides what the host exposes |
 | Health check | `node /opt/rayspec/healthcheck.mjs`: `/livez` must answer 200 |
 | Labels | `org.opencontainers.image.version` (the release) and `org.opencontainers.image.revision` (the source commit) |
 | Kept | `/bin/sh`, which the supervisor of a role-separated deploy needs; `pg_dump` and `pg_restore` of PostgreSQL 16 |
-| Media tools | `ffmpeg` and `ffprobe` in `/usr/bin`: Debian's `ffmpeg` package at the version the Dockerfile pins (`FFMPEG_VERSION`), installed without recommended packages from the Debian archive as it stood at the pinned moment (`DEBIAN_SNAPSHOT`, served by snapshot.debian.org) |
-| Removed | npm, npx, corepack and yarn. The Debian base userland otherwise stays as the base image ships it, plus the packages ffmpeg depends on. |
+| Media tools | From 1.9.1, `ffmpeg` and `ffprobe` in `/usr/bin`: Debian's `ffmpeg` package at the version the Dockerfile pins (`FFMPEG_VERSION`), installed without recommended packages from the Debian archive as it stood at the pinned moment (`DEBIAN_SNAPSHOT`, served by snapshot.debian.org) |
+| Removed | npm, npx, corepack and yarn. The Debian base userland otherwise stays as the base image ships it, plus, from 1.9.1, the packages ffmpeg depends on. |
 
 The candidate and release workflows check this table on the archived image
 (`scripts/image-conformance.mjs`): the platform, the Node patch the Dockerfile pins, the user, the
@@ -95,8 +96,36 @@ demuxer, copying the audio without re-encoding it) and checks the result with ff
 the recording goes to the speech-to-text provider and once to make it playable. Both steps fail
 closed when a tool is missing: the deployment starts and serves, and no recording is transcribed or
 played. An image without the tools could therefore not run such a product, which is why the one
-image carries them; there is no second image without them, and a product without audio never
-starts them.
+image carries them from 1.9.1; there is no second image without them, and a product without audio
+never starts them.
+
+### An image of 1.9.0 has no ffmpeg
+
+Everything in this section, the build's ffmpeg checks and the Debian entries of the image SBOM
+describe the image from 1.9.1. The Dockerfile at the `v1.9.0` tag installs no ffmpeg, its build
+checks none, and its SBOM lists npm packages only. An image built from that tag with the commands
+above builds, starts and serves, and a product that declares `audio_input` or `media_playback`
+transcribes and plays nothing on it. The 1.9.0 CLI does not warn about it either: the
+`media tools missing` warning of `rayspec bundle verify` and of the dry-run is in the CLI from
+1.9.1.
+
+With such a product on 1.9.0, do one of two things:
+
+- **Move to 1.9.1**: repack the application for 1.9.1 and build that release's image.
+- **Stay on 1.9.0 and add ffmpeg in an image of your own**, built on the one you built:
+
+  ```dockerfile
+  FROM rayspec:1.9.0
+  USER root
+  RUN apt-get update \
+      && apt-get install -y --no-install-recommends ffmpeg \
+      && rm -rf /var/lib/apt/lists/*
+  USER rayspec:rayspec
+  ```
+
+  Debian's `ffmpeg` package brings ffprobe. This installs the version Debian serves on the day
+  you build, not a pinned one, and none of the checks below run on it: confirm `ffmpeg -version`
+  and `ffprobe -version` in the image, and a recording end to end, before you rely on it.
 
 **What ffmpeg is given, and what holds it.** The chunks are bytes a signed-in caller uploaded
 through the product's audio route, each at most 8 MiB and a track at most 512 MiB by default.
