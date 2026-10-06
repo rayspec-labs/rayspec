@@ -21,6 +21,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the tool step, each model step's tokens and registry cost, the billed cost and the header's
   roll-up; the in-request cost test now holds the token columns too.
 
+### Security
+
+- **The workspace lockfile is clear of the advisories published against `proxy-addr` and
+  `source-map-js`.** The root overrides pin `proxy-addr` `2.0.8` (GHSA-jqcg-44mw-7w3h) and
+  `source-map-js` `1.2.2` (GHSA-68fv-2mgg-jv7q), the first fixed versions, and the lockfile, the
+  dependency inventory and the closure SBOM are regenerated; nothing else in the lockfile moves.
+  `proxy-addr` is in the published closure only as a dependency of `express`, which
+  `@modelcontextprotocol/sdk` declares; RaySpec starts no Express application, and
+  `RAYSPEC_TRUSTED_PROXIES` is matched by RaySpec's own code, not by `proxy-addr`, so the
+  trusted-proxy behavior of a deployment is unchanged. `source-map-js` is reached only through the
+  test tooling (`vitest`, `vite`, `postcss`) and is not part of what a consumer installs. A
+  fresh consumer install of the published packages already resolves `proxy-addr` `2.0.8`, because
+  `express` declares `^2.0.7`; the consumer scan reports nothing new.
+
 ## [1.9.0] - 2026-10-05
 
 ### Added
