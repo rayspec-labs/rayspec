@@ -30,7 +30,7 @@
       },
       {
         "name": "rayspec:lockfile-sha256",
-        "value": "c530085fa9ce5eb9b38dd6fe3086604207b03f1358bb930122629950dbcc0386"
+        "value": "e562e1e88f084024bf17a98f7de0c82fdf3fad6c9c0be9bdf8f846b14173d03f"
       },
       {
         "name": "rayspec:license-inventory",
@@ -38,7 +38,7 @@
       },
       {
         "name": "rayspec:license-inventory-sha256",
-        "value": "1d14b394195899b105e7ba0a2a58b32d8d2360fc54e6f8ba077f0818b3a7020e"
+        "value": "452cba1ad274e83938de3c3fa206efff1b746ffb3262bad22fa9d67ef8e321c8"
       },
       {
         "name": "rayspec:scope",
@@ -5810,11 +5810,11 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/proxy-addr@2.0.7",
+      "bom-ref": "pkg:npm/proxy-addr@2.0.8",
       "name": "proxy-addr",
-      "version": "2.0.7",
+      "version": "2.0.8",
       "scope": "required",
-      "purl": "pkg:npm/proxy-addr@2.0.7",
+      "purl": "pkg:npm/proxy-addr@2.0.8",
       "licenses": [
         {
           "expression": "MIT"
@@ -5823,7 +5823,7 @@
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "96542c30b4940d43d3e388ddad4fcedfbaa59e27e2b433fe670ae699972848ac8b2afb59c69c95d27dbf6c3fcde2d040019fe024475953b28cadaa0ad7e5d802"
+          "content": "e679f1d321b2554718eadf519d6700456b704fd1750fc3bdaedd3c86d3ef9dde3d5b522066d98b921bbd59f333423d5c1718c720ee9ca279d43555b993b015c9"
         }
       ]
     },
@@ -8103,7 +8103,7 @@
         "pkg:npm/on-finished@2.4.1",
         "pkg:npm/once@1.4.0",
         "pkg:npm/parseurl@1.3.3",
-        "pkg:npm/proxy-addr@2.0.7",
+        "pkg:npm/proxy-addr@2.0.8",
         "pkg:npm/qs@6.16.0",
         "pkg:npm/range-parser@1.2.1",
         "pkg:npm/router@2.2.0",
@@ -8652,7 +8652,7 @@
       ]
     },
     {
-      "ref": "pkg:npm/proxy-addr@2.0.7",
+      "ref": "pkg:npm/proxy-addr@2.0.8",
       "dependsOn": ["pkg:npm/forwarded@0.2.0", "pkg:npm/ipaddr.js@1.9.1"]
     },
     {
