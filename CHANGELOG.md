@@ -83,6 +83,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [fixtures for the fake speech-to-text adapter](docs/spec-reference.md#fixtures-for-the-fake-speech-to-text-adapter)
   and [standing in for a configured backend](docs/spec-reference.md#standing-in-for-a-configured-backend).
 
+- **A warning when a bundle needs ffmpeg and the host has none.** `rayspec bundle verify` and
+  `rayspec deploy <file.ray> --dry-run` write one line starting with
+  `warning: media tools missing` to stderr when the bundle requires `audio_input` or
+  `media_playback` and `ffmpeg` or `ffprobe` is not found on the host: as a file the user may
+  execute in a directory of `PATH`, or at the path `RAYSPEC_FFMPEG_BIN` / `RAYSPEC_FFPROBE_BIN`
+  names. The line is written with and without `--json`; the dry-run writes it as soon as the bundle
+  is read, whatever the plan then says. Nothing is started to find out, so a tool that is present
+  but broken is not noticed. **The result envelope, its `warnings`, the verdict, the plan and the
+  exit code are unchanged**: the envelope's warning codes are the closed list of the bundle
+  contract, which has no code for a host tool, so this is a line on stderr and not an entry of
+  `warnings`. A deploy without `--dry-run` behaves as before: it serves, and stitching a recording
+  fails closed. A bundle that requires neither capability never gets the line.
+
 ### Fixed
 
 - **An audio session is marked `completed` once all its tracks are sealed.** The audio capability
@@ -139,6 +152,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same example with a backend that reports usage per model response around a tool call, and holds
   the tool step, each model step's tokens and registry cost, the billed cost and the header's
   roll-up; the in-request cost test now holds the token columns too.
+
+- **The runtime image can run a product that records audio: it carries ffmpeg and ffprobe.** The
+  image installed Node, the published packages and the PostgreSQL client tools, and no ffmpeg. The
+  audio capability stitches a recording's Ogg-Opus chunks with ffmpeg and checks the result with
+  ffprobe, before transcription and to make the recording playable, and fails closed without them,
+  so a product that declares `audio_input` or `media_playback` deployed on the image and then
+  transcribed and played nothing. The one image now installs Debian's `ffmpeg` package, which
+  carries both tools: at a pinned version (`FFMPEG_VERSION` in
+  `deployments/runtime-image/Dockerfile`), from the Debian archive as it stood at a pinned moment
+  (`DEBIAN_SNAPSHOT`, served by snapshot.debian.org), without recommended packages, with the package
+  lists, logs and caches of the install removed. There is no second image without it. The build
+  runs both tools, requires the concat demuxer and the Ogg-Opus muxer, and stitches two generated
+  chunks the way the capability does, so a build without a working ffmpeg fails;
+  `scripts/image-conformance.mjs` requires both tools at the pinned version and runs the image's own
+  `@rayspec/audio-runtime` on two chunks as the image's user. **The image is larger:** ffmpeg
+  brings 206 Debian packages with it, and an image built from the 1.9.0 tarballs grew from 1.30 GB
+  to 1.75 GB unpacked and from 402 MB to 572 MB as an archive. The build now also needs
+  snapshot.debian.org.
+- **The image SBOM lists the image's Debian packages.** `image-sbom.cdx.json` listed the npm
+  packages under `/opt/rayspec` and left out the Debian userland. `scripts/gen-image-sbom.mjs` now
+  also reads the image's dpkg record (`/var/lib/dpkg/status`) and lists every installed Debian
+  package as `pkg:deb/debian/<name>@<version>?arch=<arch>&distro=debian-<release>`: the base
+  image's userland, ffmpeg and everything ffmpeg depends on. It refuses an image without a dpkg
+  record, and one whose record names no installed `ffmpeg`. A Debian package carries no digest and
+  no licence in the SBOM, since dpkg records neither; Node and the PostgreSQL client tools are still
+  not listed. No step scans the Debian packages for advisories.
+- **The documentation no longer describes a runtime image on GHCR listed in a signed release
+  manifest.** 1.9.0 was published from a maintainer's machine with npm, not by the release workflow:
+  its npm packages carry no provenance attestation, the release manifest attached to its GitHub
+  release is unsigned, and its runtime image was built and tested by the release build and pushed
+  nowhere. `docs/runtime-image.md` and `docs/self-hosted-deployment.md` told operators to pull
+  `ghcr.io/rayspec-labs/rayspec` by the digest of a signed manifest, which does not exist. They now
+  say how to get the image (build it from the tarballs the release attaches, with the two
+  `docker buildx build` commands given there), what the unsigned manifest shows and does not show,
+  why the digest it names cannot be pulled or reproduced, and that the image carries ffmpeg and
+  why. `docs/releasing.md` states how 1.9.0 and 1.9.1 are published and what such a release
+  carries.
 
 ### Security
 

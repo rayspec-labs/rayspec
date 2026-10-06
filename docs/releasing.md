@@ -2,11 +2,37 @@
 
 This is the maintainer runbook for a RaySpec release: how a release candidate is built and tested,
 how a candidate or a release is verified, and how the owner publishes. Nothing in this repository
-publishes on its own. Every registry write happens in the release workflow
-(`.github/workflows/release.yml`), which a maintainer dispatches by hand from the release tag, the
-approver signs for on their own machine, and a reviewer approves.
+publishes on its own. The release workflow (`.github/workflows/release.yml`) can make every registry
+write, dispatched by hand from the release tag, signed for by the approver on their own machine and
+approved by a reviewer; its publish steps have not run yet.
+
+## How 1.9.0 and 1.9.1 are published
+
+1.9.0 was published by the owner from their own machine with npm, not by the release workflow, and
+1.9.1 is published the same way. What such a release carries differs from the table below in three
+places, and the documentation for users says so ([The runtime image](./runtime-image.md),
+[Self-hosted deployment](./self-hosted-deployment.md)):
+
+- **No npm provenance attestation.** npm attests provenance only for a publish from a supported CI
+  workflow. The packages are the tarballs the release build packed and tested, and the release
+  manifest lists their integrities; nothing attests where they were built.
+- **An unsigned release manifest.** `release-manifest.json` is attached to the GitHub release
+  without `release-manifest.json.sig`. It is the catalog the release build wrote. It proves nothing
+  about who published the release.
+- **No image in a registry.** The release build builds the runtime image and runs the image checks
+  on it; the image is not pushed to `ghcr.io/rayspec-labs/rayspec` or anywhere else, and its archive
+  is not attached to the GitHub release. The manifest's `images[0]` still names that repository and
+  the digest of the image the build made, because the contract's schema requires both: read it as
+  the record of what was built, not as something to pull. Users build the image from the release's
+  tarballs ([Getting the image](./runtime-image.md#getting-the-image)).
+
+The GitHub release of 1.9.0 has the packed tarballs, `release-manifest.json`,
+`rayspec-release-identity.json` and `closure-sbom.cdx.json` attached, and none of the other files of
+the table.
 
 ## What a release ships
+
+The artifacts of a release the release workflow publishes:
 
 | Artifact | Where | Made by |
 |---|---|---|
@@ -17,7 +43,7 @@ approver signs for on their own machine, and a reviewer approves.
 | `managed-receipt.json`: the managed-posture receipt | GitHub release | `scripts/managed-receipt.mjs` |
 | `rayspec-release-identity.json`: the closure mapped back to its commit (also inside the launcher package) | GitHub release, npm | `scripts/release-identity.mjs` |
 | `closure-sbom.cdx.json`: the CycloneDX 1.5 SBOM of the published closure as the workspace lockfile resolves it, with each tarball's SHA-512 | GitHub release | `scripts/gen-closure-sbom.mjs --tarballs` |
-| `image-sbom.cdx.json`: the CycloneDX 1.5 SBOM of the npm packages installed in the image, naming the image by digest | GitHub release | `scripts/gen-image-sbom.mjs` |
+| `image-sbom.cdx.json`: the CycloneDX 1.5 SBOM of the npm packages installed in the image and of the Debian packages its dpkg record names (the base userland, ffmpeg and what it depends on), naming the image by digest | GitHub release | `scripts/gen-image-sbom.mjs` |
 | `package-lock.json` of the image: the tree the image was installed from with `npm ci` | GitHub release, and `/opt/rayspec/package-lock.json` in the image | the Dockerfile's `lock` stage |
 | The packed tarballs | GitHub release | `scripts/publish.mjs --pack` |
 
@@ -71,6 +97,17 @@ in the image are the ones the registry served when the candidate was built, whic
 the ones the workspace lockfile pins and `closure-sbom.cdx.json` lists; `image-sbom.cdx.json` lists
 what the image holds, and the candidate workflow scans the lockfile with osv-scanner as ci.yml scans
 a consumer install.
+
+The image also installs ffmpeg, which a product that records audio needs: Debian's package at the
+version the Dockerfile pins (`FFMPEG_VERSION`), from the Debian archive as it stood at the pinned
+moment (`DEBIAN_SNAPSHOT`, served by snapshot.debian.org), so the build needs that host besides the
+npm registry and Docker Hub. The build itself stitches two generated Ogg-Opus chunks and fails
+when ffmpeg cannot; `image-conformance.mjs` repeats that through the audio capability installed in
+the image, and `gen-image-sbom.mjs` refuses an image without an installed ffmpeg. To take a Debian
+security update of ffmpeg, move both values together: the version must be the one that snapshot
+offers (`apt-cache policy ffmpeg` in the base image, with its package sources pointed at the
+snapshot). The Debian packages are listed in the image SBOM and are not scanned for advisories by
+the candidate workflow, which scans the npm lockfile.
 
 Then test exactly those artifacts. DATABASE_URL names a PostgreSQL 16 server where databases and
 roles may be created (see `.env.example`).
@@ -132,6 +169,12 @@ node scripts/release-identity.mjs --verify --tarballs ./tarballs --manifest rays
 npm view rayspec@1.9.0 dist.integrity   # the integrity the manifest lists for rayspec
 docker buildx imagetools inspect ghcr.io/rayspec-labs/rayspec@<digest from the manifest>
 ```
+
+For a release published from the owner's machine (1.9.0, 1.9.1) leave out `--signature`,
+`--trusted-key` and `--image-oci`: there is no signature file and no image archive to check, and
+the `imagetools` line finds nothing, because the image was not pushed. Without a signature the
+verify shows that the manifest is well formed and that the tarballs are the bytes it lists, and
+`npm view` that npm serves those bytes; it does not show who wrote the manifest.
 
 The signature is the contract's detached signature file: Ed25519 over
 `rayspec-release-manifest-v1\nsha256:<SHA-256 of the manifest file>\n`, naming the SHA-256 of the
@@ -243,4 +286,8 @@ For each release:
   the tree its own lockfile records, resolved when the image was built: `image-sbom.cdx.json`
   describes it, and its third-party versions can differ from the closure SBOM's.
 - A rebuild of a commit is not byte-reproducible (see What a rebuild reproduces).
-- The release workflow's publish steps have not run yet: the first release is their first run.
+- The release workflow's publish steps have not run yet: 1.9.0 and 1.9.1 are published from the
+  owner's machine (see How 1.9.0 and 1.9.1 are published), so the first release the workflow
+  publishes is their first run.
+- The image's Debian packages, ffmpeg among them, are pinned by the base image's digest and the
+  Debian snapshot and listed in the image SBOM; no step scans them for advisories.

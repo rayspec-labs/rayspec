@@ -13,7 +13,9 @@
  *      installation is owned by root and not one file of it or of the PostgreSQL client tools is
  *      writable by that user; /var/lib/rayspec is that user's, mode 0700; npm, npx, corepack and
  *      yarn are gone; `rayspec --version` names the release; `rayspec-serve` is on PATH; pg_dump and
- *      pg_restore are PostgreSQL 16.
+ *      pg_restore are PostgreSQL 16. ffmpeg and ffprobe are the Debian version the Dockerfile pins,
+ *      and the audio capability installed in the image stitches two Ogg-Opus chunks, encoded there,
+ *      into one stream of their combined length, as that same user.
  *   3. THE CONTRACT CORPUS, through the image's own CLI (`scripts/corpus-conformance.mjs`, mounted
  *      read-only with the corpus).
  *   4. A REFERENCE APPLICATION SERVED BY IT. The team-notes application (release 1.0.0) is packed,
@@ -53,6 +55,19 @@ export const STATE_DIR = '/var/lib/rayspec';
 export function pinnedNodeVersion(dockerfile) {
   const m = /^ARG NODE_IMAGE=node:(\d+\.\d+\.\d+)-[^@\s]+@sha256:[a-f0-9]{64}$/m.exec(dockerfile);
   return m === null ? null : m[1];
+}
+
+/**
+ * The ffmpeg the Dockerfile pins: Debian's package version (`ARG FFMPEG_VERSION=<epoch>:<version>`)
+ * and the moment of the archive it is installed from (`ARG DEBIAN_SNAPSHOT=<yyyymmddThhmmssZ>`).
+ * Null unless both are pinned exactly.
+ */
+export function pinnedFfmpeg(dockerfile) {
+  const version = /^ARG FFMPEG_VERSION=((?:\d+:)?\d[0-9A-Za-z.+~-]*)$/m.exec(dockerfile);
+  const snapshot = /^ARG DEBIAN_SNAPSHOT=(\d{8}T\d{6}Z)$/m.exec(dockerfile);
+  return version === null || snapshot === null
+    ? null
+    : { version: version[1], snapshot: snapshot[1] };
 }
 
 /**
@@ -107,6 +122,75 @@ console.log(JSON.stringify({
   pgRestore: tool('pg_restore'),
 }));
 `;
+
+/** The audio capability as the image installed it; its root exports `remuxChunks`. */
+export const AUDIO_RUNTIME = '/opt/rayspec/node_modules/@rayspec/audio-runtime/dist/index.js';
+
+/**
+ * The script run inside the image for its media tools; it prints one JSON object. Two one-second
+ * Ogg-Opus chunks are encoded with the image's ffmpeg, each a stream of its own as a recording
+ * client uploads them, and handed to the capability's own `remuxChunks`, which runs ffmpeg's concat
+ * demuxer and probes the result with ffprobe.
+ */
+export const MEDIA_PROBE = `
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { spawnSync } = require('node:child_process');
+const banner = (name) => {
+  const res = spawnSync(name, ['-version'], { encoding: 'utf8' });
+  return res.status === 0 ? res.stdout.split('\\n')[0] : null;
+};
+(async () => {
+  const facts = { ffmpeg: banner('ffmpeg'), ffprobe: banner('ffprobe'), chunks: 0, remux: null, error: null };
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), 'media-probe-'));
+  try {
+    const chunks = [];
+    for (const frequency of [440, 660]) {
+      const file = path.join(work, frequency + '.opus');
+      const made = spawnSync('ffmpeg', ['-nostdin', '-hide_banner', '-loglevel', 'error', '-f', 'lavfi',
+        '-i', 'sine=frequency=' + frequency + ':duration=1', '-c:a', 'libopus', file], { encoding: 'utf8' });
+      if (made.status !== 0) throw new Error('ffmpeg encoded no chunk: ' + (made.stderr || made.error));
+      chunks.push(new Uint8Array(fs.readFileSync(file)));
+    }
+    facts.chunks = chunks.length;
+    const { remuxChunks } = await import('${AUDIO_RUNTIME}');
+    const stitched = await remuxChunks(chunks);
+    facts.remux = { bytes: stitched.bytes.length, durationS: stitched.durationS };
+    await stitched.cleanup();
+  } catch (err) {
+    facts.error = String((err && err.message) || err);
+  } finally {
+    fs.rmSync(work, { recursive: true, force: true });
+  }
+  console.log(JSON.stringify(facts));
+})();
+`;
+
+/**
+ * The judgement of the media probe's facts against the ffmpeg the Dockerfile pins. Debian's ffmpeg
+ * names its package version without the epoch (`ffmpeg version 7.1.5-0+deb13u1`).
+ */
+export function judgeMedia(facts, pinned) {
+  const version = pinned === null ? null : pinned.version.replace(/^\d+:/, '');
+  const names = (banner, tool) =>
+    version !== null &&
+    typeof banner === 'string' &&
+    banner.startsWith(`${tool} version ${version} `);
+  return [
+    [`ffmpeg is ${version}, the version the Dockerfile pins`, names(facts.ffmpeg, 'ffmpeg')],
+    [`ffprobe is ${version}, the version the Dockerfile pins`, names(facts.ffprobe, 'ffprobe')],
+    [
+      'the audio capability stitches two Ogg-Opus chunks into one stream of their length',
+      facts.error === null &&
+        facts.chunks === 2 &&
+        facts.remux !== null &&
+        facts.remux.bytes > 0 &&
+        facts.remux.durationS > 1.5 &&
+        facts.remux.durationS < 2.5,
+    ],
+  ];
+}
 
 /** The judgement of the inside probe's facts against the release version and the pinned Node. */
 export function judgeInside(facts, version, nodeVersion) {
@@ -275,6 +359,15 @@ async function main(argv) {
     const facts = JSON.parse(inside.stdout.trim().split('\n').at(-1));
     report.inside = facts;
     for (const [name, ok] of judgeInside(facts, report.version, nodeVersion)) check(name, ok);
+    const pinned = pinnedFfmpeg(readFileSync(DOCKERFILE, 'utf8'));
+    check('the Dockerfile pins ffmpeg and the archive it comes from', pinned !== null);
+    report.ffmpeg = pinned;
+    const media = docker(['run', '--rm', '--entrypoint', 'node', image, '-e', MEDIA_PROBE]);
+    check('the media probe runs', media.status === 0, media.stderr.trim().slice(0, 400));
+    const mediaFacts = JSON.parse(media.stdout.trim().split('\n').at(-1));
+    report.media = mediaFacts;
+    for (const [name, ok] of judgeMedia(mediaFacts, pinned))
+      check(name, ok, mediaFacts.error ?? undefined);
 
     // 3. The contract corpus through the image's CLI.
     const corpusArgs = [

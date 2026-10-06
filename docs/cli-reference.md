@@ -709,9 +709,23 @@ structural checks (so `--require-signature` and `RAY_W_UNSIGNED` apply to it
 too), but no capability, binding, spec or secret checks: its contents are
 encrypted and are not read.
 
-- **Postgres:** not needed. **Environment:** none read.
+- **Postgres:** not needed. **Environment:** `PATH`, `RAYSPEC_FFMPEG_BIN` and
+  `RAYSPEC_FFPROBE_BIN`, for the media-tools warning below; nothing else.
 - **Passive:** as for inspect — nothing is extracted, imported or run, and
   nothing is written.
+- **Media tools.** A bundle that requires `audio_input` or `media_playback`
+  stitches its recordings with `ffmpeg` and checks them with `ffprobe`. When
+  either cannot be found on the host that runs `verify` — as a file the user
+  may execute in a directory of `PATH`, or at the path `RAYSPEC_FFMPEG_BIN` /
+  `RAYSPEC_FFPROBE_BIN` names — one line starting with
+  `warning: media tools missing` is written to stderr, with or without
+  `--json`. It names the capabilities and what was looked for. Nothing is
+  started to find out, so a tool that is present but broken is not noticed
+  here. The envelope, its `warnings`, the verdict and the exit code are the same
+  with and without the line: the envelope's warning codes are a closed list of
+  the bundle contract, which has no code for a host tool. Verify on the host
+  that will serve the bundle for the line to mean anything; the
+  [runtime image](./runtime-image.md) carries both tools.
 - **Flags:** `--runtime <exact-version>` (default: this CLI's version);
   `--signature <file.ray.sig>` (default: `<file.ray>.sig` when present);
   `--trusted-key <ed25519-public-key.pem>`, repeatable — a PEM public key; a
@@ -1534,6 +1548,12 @@ inspect, bind, review, apply, readiness, update, recovery — is
   schema impact, permission changes, storage, blockers, warnings — with `planDigest`, `preparedAt`
   and `expiresAt` (30 minutes later), and writes the plan record `<state-dir>/plans/<planDigest>.json`.
   No SQL changes anything. A plan with blockers is still `ok: true`; the deploy refuses it.
+  When the bundle requires `audio_input` or `media_playback` and `ffmpeg` or `ffprobe` cannot be
+  found on this host, the dry-run writes the `warning: media tools missing` line of
+  [`bundle verify`](#bundle-verify) to stderr as soon as the bundle is read, with or without
+  `--json` and whatever the plan then says; the plan, its warnings and the exit code do not change.
+  The deploy itself does not refuse over it: it serves, and stitching a recording then fails closed,
+  so the recording is neither transcribed nor playable.
 - **`--plan-digest <sha256>`** — the plan to deploy, as a dry-run printed it. Required when the plan
   changes the schema or the grants (a first deploy always does). The plan is recomputed at its own
   `preparedAt`; a missing record, another bundle, an expired plan or any covered input that changed

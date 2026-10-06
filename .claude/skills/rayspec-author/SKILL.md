@@ -685,6 +685,11 @@ rayspec bundle sign <app-id>-<version>.ray --key-file <ed25519-private-key.pem> 
 - Every command writes one JSON envelope on stdout; read `ok`, `errors[0].code` and `errors[0].reason`.
   The refusals and their fixes are in `docs/packing.md`. An existing output needs `--force` — only
   with the user's approval.
+- `bundle verify` of a product bundle that requires `audio_input` or `media_playback` also writes a
+  line starting with `warning: media tools missing` to **stderr** when `ffmpeg` or `ffprobe` is not on
+  this machine. It is not in the envelope and does not change `ok` or the exit code. Pass it on to
+  the user: on a host without the tools the deployment serves, but no recording is transcribed or
+  playable (`docs/cli-reference.md`, "bundle verify").
 - `--build`, `--against` and `--allowlist` are refused in this release; do not use them.
 - Signing needs the user's own Ed25519 private key file (mode 0600, owned by them); never generate,
   read, print or move a key on their behalf. `bundle sign` writes `<file>.ray.sig`; the user hands out

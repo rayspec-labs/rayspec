@@ -16,7 +16,8 @@
  *    bytes are refused; an attestation manifest is ignored and a nested index is followed; a file
  *    is read from the topmost layer that holds it, and a later layer's whiteout hides it;
  *  - the image SBOM (`gen-image-sbom.mjs`) lists the image's installed tree with each tarball's
- *    SHA-512 and names the image by digest, and refuses an image without the tree;
+ *    SHA-512 and the Debian packages its dpkg record names as installed, names the image by digest,
+ *    and refuses an image without the tree, without the dpkg record or without an installed ffmpeg;
  *  - sign and verify through the command line: a key file other users can read and a key that is
  *    not Ed25519 are refused; a signature verifies with the release key and not with another; a
  *    manifest changed after signing does not verify; tarballs and image are checked against it: a
@@ -49,7 +50,14 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { gzipSync } from 'node:zlib';
 import { CHECKS } from './certification.mjs';
-import { INSTALLED_TREE, imageSbom, main as imageSbomMain } from './gen-image-sbom.mjs';
+import {
+  DPKG_STATUS,
+  debianPackages,
+  INSTALLED_TREE,
+  imageSbom,
+  main as imageSbomMain,
+  OS_RELEASE,
+} from './gen-image-sbom.mjs';
 import { receiptOf } from './managed-receipt.mjs';
 import {
   buildEvidence,
@@ -288,9 +296,37 @@ function installedTree(dir = tarballDir) {
   return Buffer.from(JSON.stringify({ name: 'rayspec-runtime', lockfileVersion: 3, packages }));
 }
 
-const archive = ociArchive(join(work, 'image.tar'), {
-  layers: [{ 'etc/hostname': 'image\n' }, { [INSTALLED_TREE]: installedTree() }],
+/** A dpkg record: one stanza per `[name, version, status]`. */
+function dpkgStatus(packages) {
+  return packages
+    .map(
+      ([name, version, status = 'install ok installed']) =>
+        `Package: ${name}\nStatus: ${status}\nArchitecture: amd64\nVersion: ${version}\n` +
+        `Description: ${name}\n more about ${name}\n`,
+    )
+    .join('\n');
+}
+
+const OS_RELEASE_TEXT = 'PRETTY_NAME="Debian GNU/Linux 13 (trixie)"\nVERSION_ID="13"\nID=debian\n';
+const DPKG_STATUS_TEXT = dpkgStatus([
+  ['base-files', '13.8+deb13u1'],
+  ['ffmpeg', '7:7.1.5-0+deb13u1'],
+  ['libavcodec61', '7:7.1.5-0+deb13u1'],
+  // dpkg remembers the configuration of a removed package: it is not installed.
+  ['curl', '8.14.1-2', 'deinstall ok config-files'],
+]);
+/** The layers of the image: the base, the Debian packages, the installed tree. */
+const imageLayers = (status = DPKG_STATUS_TEXT) => [
+  { 'etc/hostname': 'image\n', [OS_RELEASE]: OS_RELEASE_TEXT },
+  ...(status === null ? [] : [{ [DPKG_STATUS]: status }]),
+  { [INSTALLED_TREE]: installedTree() },
+];
+const systemFiles = (status = DPKG_STATUS_TEXT) => ({
+  status: Buffer.from(status),
+  osRelease: Buffer.from(OS_RELEASE_TEXT),
 });
+
+const archive = ociArchive(join(work, 'image.tar'), { layers: imageLayers() });
 const identity = identityFor();
 const identityBytes = Buffer.from(`${JSON.stringify(identity, null, 2)}\n`);
 
@@ -521,10 +557,73 @@ await check('the image SBOM lists the installed tree and names the image by dige
   const bytes = readFileSync(join(tarballDir, `rayspec-cli-${VERSION}.tgz`));
   assert.equal(cli.hashes[0].content, createHash('sha512').update(bytes).digest('hex'));
   assert.equal(
-    imageSbom(readOciImage(archive.path), installedTree()),
+    imageSbom(readOciImage(archive.path), installedTree(), systemFiles()),
     readFileSync(imageSbomPath, 'utf8'),
   );
 });
+
+await check('the image SBOM lists the Debian packages dpkg records as installed', () => {
+  const doc = JSON.parse(readFileSync(imageSbomPath, 'utf8'));
+  const deb = doc.components.filter((c) => c.purl.startsWith('pkg:deb/'));
+  assert.deepEqual(
+    deb.map((c) => c.purl),
+    [
+      'pkg:deb/debian/base-files@13.8%2Bdeb13u1?arch=amd64&distro=debian-13',
+      'pkg:deb/debian/ffmpeg@7%3A7.1.5-0%2Bdeb13u1?arch=amd64&distro=debian-13',
+      'pkg:deb/debian/libavcodec61@7%3A7.1.5-0%2Bdeb13u1?arch=amd64&distro=debian-13',
+    ],
+  );
+  assert.equal(deb[1].version, '7:7.1.5-0+deb13u1');
+  const refs = doc.components.map((c) => c['bom-ref']);
+  assert.deepEqual(refs, [...refs].sort(), 'the components are in one order');
+  assert.equal(new Set(refs).size, refs.length);
+  const property = (name) => doc.metadata.properties.find((p) => p.name === name)?.value;
+  assert.equal(property('rayspec:dpkg-record'), '/var/lib/dpkg/status');
+  assert.equal(property('rayspec:dpkg-record-sha256'), sha256(Buffer.from(DPKG_STATUS_TEXT)));
+});
+
+await check(
+  'the image SBOM refuses an image without a dpkg record or an installed ffmpeg',
+  async () => {
+    const out = join(work, 'no-ffmpeg-sbom.json');
+    const refusedFor = async (name, status, reason) => {
+      const image = ociArchive(join(work, `${name}.tar`), { layers: imageLayers(status) });
+      const { code, stderr } = await run(['--image-oci', image.path, '--out', out], imageSbomMain);
+      assert.equal(code, 1, name);
+      assert.match(stderr, reason);
+      assert.equal(existsSync(out), false);
+    };
+    await refusedFor('no-dpkg', null, /holds no \/var\/lib\/dpkg\/status/);
+    await refusedFor(
+      'no-ffmpeg',
+      dpkgStatus([['base-files', '13.8+deb13u1']]),
+      /names no installed ffmpeg package/,
+    );
+    await refusedFor(
+      'removed-ffmpeg',
+      dpkgStatus([['ffmpeg', '7:7.1.5-0+deb13u1', 'deinstall ok config-files']]),
+      /names no installed ffmpeg package/,
+    );
+    const noRelease = ociArchive(join(work, 'no-release.tar'), {
+      layers: [{ [DPKG_STATUS]: DPKG_STATUS_TEXT }, { [INSTALLED_TREE]: installedTree() }],
+    });
+    const lacking = await run(['--image-oci', noRelease.path, '--out', out], imageSbomMain);
+    assert.equal(lacking.code, 1);
+    assert.match(lacking.stderr, /holds no \/usr\/lib\/os-release/);
+    assert.throws(
+      () => debianPackages(Buffer.from(DPKG_STATUS_TEXT), Buffer.from('NAME=unknown\n')),
+      /names no distribution and release/,
+    );
+    assert.throws(
+      () =>
+        debianPackages(
+          Buffer.from('Package: ffmpeg\nStatus: install ok installed\nArchitecture: amd64\n'),
+          Buffer.from(OS_RELEASE_TEXT),
+        ),
+      /ffmpeg in the image's dpkg record has no version/,
+    );
+  },
+);
 
 await check(
   'the image SBOM refuses an image without the installed tree or the launcher',
@@ -538,7 +637,7 @@ await check(
     const tree = JSON.parse(installedTree().toString());
     delete tree.packages['node_modules/rayspec'];
     assert.throws(
-      () => imageSbom(readOciImage(archive.path), Buffer.from(JSON.stringify(tree))),
+      () => imageSbom(readOciImage(archive.path), Buffer.from(JSON.stringify(tree)), systemFiles()),
       /no rayspec 1\.9\.0-rc\.0 launcher/,
     );
   },
@@ -739,7 +838,7 @@ await check(
 
 await check('verify refuses an image archive that lost a layer', async () => {
   const lost = ociArchive(join(work, 'lost-layer.tar'), {
-    layers: [{ 'etc/hostname': 'image\n' }, { [INSTALLED_TREE]: installedTree() }],
+    layers: imageLayers(),
     dropLayer: 1,
   });
   assert.equal(lost.digest, archive.digest, 'the archive names the same image');

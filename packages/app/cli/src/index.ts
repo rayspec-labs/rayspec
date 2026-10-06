@@ -210,7 +210,11 @@ const HELP_SECTIONS: readonly HelpSection[] = [
                                 --trusted-key public keys. --require-signature refuses an unsigned
                                 bundle; an unsigned bundle otherwise passes with warning
                                 RAY_W_UNSIGNED. Nothing is run or written. Writes ONE result envelope
-                                (verdict deployable / not-deployable). Exit 0 deployable / 1 spec
+                                (verdict deployable / not-deployable). When the bundle requires
+                                audio_input or media_playback and ffmpeg or ffprobe is not found on
+                                this host (PATH, or RAYSPEC_FFMPEG_BIN / RAYSPEC_FFPROBE_BIN), a
+                                warning line on stderr says so; the envelope and the exit code are
+                                unchanged. Exit 0 deployable / 1 spec
                                 invalid / 2 invalid input / 3 incompatible runtime, target or
                                 capability / 4 reserved binding, secret or signature refusal /
                                 7 internal error.`,
@@ -308,7 +312,11 @@ const HELP_SECTIONS: readonly HelpSection[] = [
                                 print it — binding names, schema impact, permission changes,
                                 warnings, blockers and the plan digest, valid 30 minutes. Writes only
                                 the plan record to the state directory (default .rayspec-state); no
-                                SQL changes anything and nothing from the bundle runs. A file that
+                                SQL changes anything and nothing from the bundle runs. When the
+                                bundle requires audio_input or media_playback and ffmpeg or ffprobe
+                                is not found on this host (PATH, or RAYSPEC_FFMPEG_BIN /
+                                RAYSPEC_FFPROBE_BIN), a warning line on stderr says so; the plan is
+                                unchanged. A file that
                                 starts with a ZIP signature or is named .ray takes this path; no
                                 .env file is loaded on it.
   rayspec deploy <file.ray> [--bindings-file <file>] [--plan-digest <sha256>] [--state-dir <dir>]
@@ -854,6 +862,10 @@ async function runBundleVerb(rest: readonly string[], json: boolean): Promise<nu
     if (!outcome.json && outcome.summary.length > 0) {
       await writeDrained(process.stderr, `${outcome.summary.join('\n')}\n`);
     }
+    // A warning about this host is not part of the description: it is written under --json too.
+    if (outcome.notices !== undefined && outcome.notices.length > 0) {
+      await writeDrained(process.stderr, `${outcome.notices.join('\n')}\n`);
+    }
     await writeEnvelope(process.stdout, outcome.envelope);
     return envelopeExitCode(outcome.envelope);
   } catch (err) {
@@ -1062,6 +1074,10 @@ async function runDeployBundleVerb(rest: readonly string[], json: boolean): Prom
     }
     if (!json && outcome.summary.length > 0) {
       await writeDrained(process.stderr, `${outcome.summary.join('\n')}\n`);
+    }
+    // A warning about this host is not part of the description: it is written under --json too.
+    if (outcome.notices !== undefined && outcome.notices.length > 0) {
+      await writeDrained(process.stderr, `${outcome.notices.join('\n')}\n`);
     }
     await writeEnvelope(stdout.sink, outcome.envelope);
     return envelopeExitCode(outcome.envelope);

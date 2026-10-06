@@ -1,18 +1,66 @@
 # The runtime image
 
-Each release ships a linux/amd64 container image of the RaySpec runtime on GHCR, listed by digest
-in the signed release manifest. It holds Node at the release's pinned 22 patch, the published npm
-packages installed from the release tarballs, and the PostgreSQL 16 client tools that `rayspec
-export` and `rayspec import` run. Its entrypoint is `rayspec`, so every command of the
-[CLI reference](./cli-reference.md) runs as `docker run <image> <command> ...`; `rayspec-serve` is on
-`PATH` as well.
+Each release defines a linux/amd64 container image of the RaySpec runtime
+(`deployments/runtime-image/Dockerfile`). It holds Node at the release's pinned 22 patch, the
+published npm packages installed from the release tarballs, the PostgreSQL 16 client tools that
+`rayspec export` and `rayspec import` run, and ffmpeg with ffprobe for products that record audio.
+Its entrypoint is `rayspec`, so every command of the [CLI reference](./cli-reference.md) runs as
+`docker run <image> <command> ...`; `rayspec-serve` is on `PATH` as well.
 
-Pull it by digest, never by tag. The digest is `images[0].digest` of `release-manifest.json`, whose
-signature you verify first ([Releasing → Verifying a release](./releasing.md#verifying-a-release)):
+## Getting the image
+
+**The image is not in a registry.** The release build builds it and runs the checks below on it,
+and nothing pushes it: `ghcr.io/rayspec-labs/rayspec` serves no RaySpec image, and no image archive
+is attached to the GitHub release. You build the image yourself, from the tarballs the release
+attaches and the Dockerfile at the release's tag:
 
 ```bash
-docker pull ghcr.io/rayspec-labs/rayspec@sha256:<digest from the signed release manifest>
+git clone --depth 1 --branch v<version> https://github.com/rayspec-labs/rayspec && cd rayspec
+gh release download v<version> --pattern '*.tgz' --dir ./tarballs
+
+docker buildx create --name rayspec-image --driver docker-container
+# 1. Resolve the dependency tree of the tarballs once, into ./lock/package-lock.json.
+docker buildx build --builder rayspec-image --platform linux/amd64 \
+  --build-context tarballs=./tarballs \
+  --target lock --output type=local,dest=./lock deployments/runtime-image
+# 2. Build the image from that lockfile, into an archive `docker load` reads.
+docker buildx build --builder rayspec-image --platform linux/amd64 --provenance=false --sbom=false \
+  --build-context tarballs=./tarballs --build-context lock=./lock \
+  --build-arg RAYSPEC_VERSION=<version> \
+  --build-arg SOURCE_COMMIT="$(git rev-parse HEAD)" \
+  --build-arg SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)" \
+  --output type=docker,oci-mediatypes=true,rewrite-timestamp=true,dest=./rayspec-runtime.oci.tar,name=rayspec:<version> \
+  deployments/runtime-image
+docker load -i ./rayspec-runtime.oci.tar
 ```
+
+The build refuses when the `rayspec` package among the tarballs is not `<version>`, when ffmpeg or
+ffprobe does not run, and when ffmpeg cannot stitch two Ogg-Opus chunks into one stream. It needs
+the npm registry (for the third-party packages), Docker Hub (for the two base images, pinned by
+digest) and snapshot.debian.org (for ffmpeg), and several gigabytes of free disk: the build cache,
+the archive and the loaded image together take about 10 GB. The examples below call the result `rayspec:<version>`;
+push it to a registry of your own if your hosts pull images, and refer to it there by the digest
+that registry reports.
+
+**What the release manifest tells you about the image, and what it does not.** The release attaches
+`release-manifest.json`: the version, the source commit, every package with its npm integrity, and
+under `images[0]` the platform, the Node version and the digest of the image the release build made.
+
+- The manifest is **not signed**: no `release-manifest.json.sig` is attached. It shows what the
+  release build recorded, to anyone who trusts the GitHub release it is attached to. It does not
+  show who built the release, and it protects nothing against someone who can change the release's
+  files.
+- The npm packages carry **no npm provenance attestation**: they were published from a maintainer's
+  machine, not by a workflow. The manifest's integrities let you check that the tarballs you
+  downloaded, and the packages npm serves (`npm view rayspec@<version> dist.integrity`), are the
+  bytes the release build packed; [Releasing](./releasing.md#verifying-a-release) has the command.
+- `images[0].digest` names an image you cannot pull, and **your own build has another digest**: the
+  third-party npm packages are resolved from the registry when the lockfile of step 1 is written, so
+  two builds differ. Do not look for that digest in a registry and do not expect to reproduce it.
+  What you can check about your own image is its content: `node scripts/gen-image-sbom.mjs
+  --image-oci ./rayspec-runtime.oci.tar --out image-sbom.cdx.json` lists every npm and Debian
+  package in it, each `@rayspec` package with the SHA-512 of the tarball it was installed from, which
+  is the integrity the manifest lists.
 
 ## What the image is
 
@@ -22,21 +70,54 @@ docker pull ghcr.io/rayspec-labs/rayspec@sha256:<digest from the signed release 
 | Base | `node:<pinned 22 patch>-trixie-slim`, pinned by digest in `deployments/runtime-image/Dockerfile` |
 | User | `rayspec` (uid and gid 10001). The image never runs as root. |
 | Installation | `/opt/rayspec`, owned by root and not writable by any other user, installed from the release tarballs with `npm ci` from the lockfile the release ships (`/opt/rayspec/package-lock.json`), install scripts disabled |
-| SBOM | `image-sbom.cdx.json` of the release lists every npm package installed in the image, with the image's digest |
+| SBOM | `scripts/gen-image-sbom.mjs` writes `image-sbom.cdx.json` from the image archive: every npm package installed under `/opt/rayspec` and every Debian package of the image's dpkg record (the base userland, ffmpeg and what ffmpeg depends on), with the image's digest |
 | Working directory | `/var/lib/rayspec`, owned by `rayspec`, mode 0700: put the state directory and the blob root here, on a volume |
 | Listening | port 8080 (`PORT`), on every address of the container (`RAYSPEC_HOST=0.0.0.0`); `docker run -p` decides what the host exposes |
 | Health check | `node /opt/rayspec/healthcheck.mjs`: `/livez` must answer 200 |
 | Labels | `org.opencontainers.image.version` (the release) and `org.opencontainers.image.revision` (the source commit) |
 | Kept | `/bin/sh`, which the supervisor of a role-separated deploy needs; `pg_dump` and `pg_restore` of PostgreSQL 16 |
-| Removed | npm, npx, corepack and yarn. The Debian base userland otherwise stays as the base image ships it. |
+| Media tools | `ffmpeg` and `ffprobe` in `/usr/bin`: Debian's `ffmpeg` package at the version the Dockerfile pins (`FFMPEG_VERSION`), installed without recommended packages from the Debian archive as it stood at the pinned moment (`DEBIAN_SNAPSHOT`, served by snapshot.debian.org) |
+| Removed | npm, npx, corepack and yarn. The Debian base userland otherwise stays as the base image ships it, plus the packages ffmpeg depends on. |
 
-The candidate and release workflows check this table on the archived image before it is published
+The candidate and release workflows check this table on the archived image
 (`scripts/image-conformance.mjs`): the platform, the Node patch the Dockerfile pins, the user, the
 installation's owner and that no file of it is writable by the user, the working directory's owner
-and mode, the port and address, the health check, the labels, `/bin/sh`, the client tools and the
-removed package managers. The base image's digest is pinned in the Dockerfile and not checked again;
-that the image holds the lockfile it was built from is checked by `scripts/release-candidate.mjs`,
-and the image SBOM by `scripts/release-manifest.mjs evidence`.
+and mode, the port and address, the health check, the labels, `/bin/sh`, the client tools, the
+removed package managers, and the media tools (below). The base image's digest is pinned in the
+Dockerfile and not checked again; that the image holds the lockfile it was built from is checked by
+`scripts/release-candidate.mjs`, and the image SBOM by `scripts/release-manifest.mjs evidence`.
+
+## ffmpeg and ffprobe
+
+A product that declares `audio_input` or `media_playback` receives a recording as a series of
+Ogg-Opus chunks. The audio capability stitches them into one stream with ffmpeg (its concat
+demuxer, copying the audio without re-encoding it) and checks the result with ffprobe, once before
+the recording goes to the speech-to-text provider and once to make it playable. Both steps fail
+closed when a tool is missing: the deployment starts and serves, and no recording is transcribed or
+played. An image without the tools could therefore not run such a product, which is why the one
+image carries them; there is no second image without them, and a product without audio never
+starts them.
+
+- **Pinned.** `FFMPEG_VERSION` names Debian's package version and `DEBIAN_SNAPSHOT` the moment of
+  the archive it and its dependencies are installed from, so a later build installs the same
+  packages. Debian's package is the only source: nothing is downloaded from elsewhere or compiled.
+  A security update of ffmpeg in Debian reaches the image when both values are moved; move them
+  together, since the version must be the one that snapshot offers.
+- **Checked when the image is built.** The build runs `ffmpeg -version` and `ffprobe -version`,
+  requires the concat demuxer and the Ogg-Opus muxer, encodes two one-second Opus chunks, stitches
+  them the way the capability does and requires one Opus stream of their combined length. A build
+  without a working ffmpeg fails.
+- **Checked on the built image.** `scripts/image-conformance.mjs` requires both tools at the pinned
+  version and runs the audio capability installed in the image (`remuxChunks` of
+  `@rayspec/audio-runtime`) on two chunks, as the image's own user. `scripts/gen-image-sbom.mjs`
+  refuses an image whose dpkg record names no installed ffmpeg.
+- **Its cost.** Debian's ffmpeg is the full build, and it brings 206 packages with it (codec,
+  filter and display libraries). Measured on an image built from the 1.9.0 tarballs, the unpacked
+  image grew from 1.30 GB to 1.75 GB and its archive from 402 MB to 572 MB.
+- **Outside the image** the tools are yours to install. `rayspec bundle verify` and the dry-run of a
+  bundle deploy write a warning to stderr when the bundle requires an audio capability and ffmpeg
+  or ffprobe is not found on the host ([CLI reference](./cli-reference.md#bundle-verify));
+  `RAYSPEC_FFMPEG_BIN` and `RAYSPEC_FFPROBE_BIN` name executables that are not on `PATH`.
 
 ## Running it
 
@@ -52,7 +133,7 @@ docker run -d --name team-notes \
   -e DATABASE_URL -e RAYSPEC_MIGRATION_DATABASE_URL -e RAYSPEC_SNAPSHOT_DATABASE_URL \
   -e RAYSPEC_JWT_SIGNING_KEY -e RAYSPEC_API_KEY_PEPPER \
   -e RAYSPEC_BLOB_ROOT=/var/lib/rayspec/blobs \
-  ghcr.io/rayspec-labs/rayspec@sha256:<digest> \
+  rayspec:<version> \
   deploy /srv/app/team-notes-1.0.0.ray --plan-digest <digest from the dry run> \
   --state-dir /var/lib/rayspec/state
 ```
@@ -82,14 +163,16 @@ Some prerequisites of the managed posture belong to the host, not to the image
 
 ## Building it
 
-`scripts/release-candidate.mjs` builds the image from the packed release tarballs, never from the
-workspace (see [Releasing](./releasing.md)). It first resolves the dependency tree once into a
-lockfile (the Dockerfile's `lock` stage), then builds the image from that lockfile with `npm ci`, its
-timestamps set to the commit's time. The third-party versions are therefore the ones the registry
-served when the lockfile was written, which can be newer than the workspace lockfile's; the image
-SBOM lists them. It needs a buildx builder of the `docker-container` driver, because it writes the
-image as an OCI image layout archive; `docker load -i` reads the same archive, so the image you test
-is the image the release manifest names:
+[Getting the image](#getting-the-image) builds the image of a release from its tarballs. A
+maintainer builds a candidate's image from a checkout instead: `scripts/release-candidate.mjs` packs
+the tarballs and then runs the same two builds, never installing from the workspace (see
+[Releasing](./releasing.md)). It first resolves the dependency tree once into a lockfile (the
+Dockerfile's `lock` stage), then builds the image from that lockfile with `npm ci`, its timestamps
+set to the commit's time. The third-party versions are therefore the ones the registry served when
+the lockfile was written, which can be newer than the workspace lockfile's; the image SBOM lists
+them. It needs a buildx builder of the `docker-container` driver, because it writes the image as an
+OCI image layout archive; `docker load -i` reads the same archive, so the image you test is the
+image the candidate's release manifest names:
 
 ```bash
 docker buildx create --name rayspec-release --driver docker-container
